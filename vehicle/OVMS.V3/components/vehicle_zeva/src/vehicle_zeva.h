@@ -45,18 +45,6 @@ class OvmsVehicleZeva : public OvmsVehicle
 
   public:
     void IncomingFrameCan1(CAN_frame_t* p_frame);
-    virtual vehicle_command_t CommandSetChargeMode(vehicle_mode_t mode);
-    virtual vehicle_command_t CommandSetChargeCurrent(uint16_t limit);
-    virtual vehicle_command_t CommandStartCharge();
-    virtual vehicle_command_t CommandStopCharge();
-    virtual vehicle_command_t CommandSetChargeTimer(bool timeron, uint16_t timerstart);
-    virtual vehicle_command_t CommandCooldown(bool cooldownon);
-    virtual vehicle_command_t CommandWakeup();
-    virtual vehicle_command_t CommandLock(const char* pin);
-    virtual vehicle_command_t CommandUnlock(const char* pin);
-    virtual vehicle_command_t CommandActivateValet(const char* pin);
-    virtual vehicle_command_t CommandDeactivateValet(const char* pin);
-    virtual vehicle_command_t CommandHomelink(int button, int durationms=1000);
   };
 
 #endif //#ifndef __VEHICLE_ZEVA_H__
