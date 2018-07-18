@@ -125,9 +125,13 @@ OvmsVehicleZeva::OvmsVehicleZeva()
   }
 
 OvmsVehicleZeva::~OvmsVehicleZeva()
-  {
+{
   ESP_LOGI(TAG, "Shutdown Zeva vehicle module");
-  }
+  // Release GPS
+  MyEvents.SignalEvent("vehicle.release.gps", NULL);
+  MyEvents.SignalEvent("vehicle.release.gpstime", NULL);
+
+}
 
 void OvmsVehicleZeva::IncomingFrameCan1(CAN_frame_t* p_frame)
   {
@@ -161,25 +165,25 @@ void OvmsVehicleZeva::IncomingFrameCan1(CAN_frame_t* p_frame)
          StandardMetrics.ms_v_charge_inprogress->SetValue(false);
          StandardMetrics.ms_v_charge_voltage->SetValue(0);
          StandardMetrics.ms_v_charge_current->SetValue(0);
-
         break;
         }
+
       case 3:  // Charging
         {
+         StandardMetrics.ms_v_charge_state->SetValue("charging"); // charging, stopped, topoff, done, prepare, timerwait, heating
+         StandardMetrics.ms_v_charge_substate->SetValue("onrequest"); // scheduledstart, onrequest, timerwait, powerwait, stopped
          StandardMetrics.ms_v_env_on->SetValue(false);   
          StandardMetrics.ms_v_charge_inprogress->SetValue(true);
-         StandardMetrics.ms_v_charge_voltage->SetValue(StandardMetrics.ms_v_bat_voltage->AsInt());
-         StandardMetrics.ms_v_charge_current->SetValue(StandardMetrics.ms_v_bat_current->AsInt());
-
+         StandardMetrics.ms_v_charge_voltage->SetValue(StandardMetrics.ms_v_bat_voltage->AsFloat());
+         StandardMetrics.ms_v_charge_current->SetValue(StandardMetrics.ms_v_bat_current->AsFloat());
 
         break;
-
         }
+
       case 4:  // Setup
         {
          StandardMetrics.ms_v_env_on-> SetValue(false);
          StandardMetrics.ms_v_charge_inprogress->SetValue(false);
-      
         break;
         }
       default:
@@ -204,10 +208,83 @@ void OvmsVehicleZeva::IncomingFrameCan1(CAN_frame_t* p_frame)
       // d[6] contains insulation leakage if present: only for Core module
       break;
       }
+
+    case 0x610: // Brusa NLG5 variables, need to check the byte ordering
+      StandardMetrics.ms_v_charge_pilot->SetValue(d[0] & 0x80 ); // bit 7
+
+      break;
+
+
+    case 0x611: // Brusa NLG5 variables, need to check the byte ordering
+      StandardMetrics.ms_v_charge_current->SetValue( ((unsigned int) d[0] << 8) + d[1] );
+      StandardMetrics.ms_v_charge_voltage->SetValue( ((unsigned int) d[2] << 8) + d[3] );
+      StandardMetrics.ms_v_bat_voltage->SetValue( ((unsigned int) d[4] << 8) + d[5] );
+      StandardMetrics.ms_v_bat_current->SetValue( ((unsigned int) d[6] << 8) + d[7] );
+      //StandardMetrics.ms_v_bat_power->SetValue(StandardMetrics.ms_v_bat_current->AsInt() * StandardMetrics.ms_v_bat_voltage->AsInt());
+      break;
+
+    case 0x612: // Brusa NLG5 variables, need to check the byte ordering
+      StandardMetrics.ms_v_charge_climit->SetValue( ((unsigned int) d[0] << 8) + d[1] ); // mains current limit by ControlPilot
+      if (d[2] < StandardMetrics.ms_v_charge_climit->AsInt()) 
+        {
+          StandardMetrics.ms_v_charge_climit->SetValue( (unsigned int) d[2]); // mains current limit by PowerIndicator
+        }
+      break;
+
+    case 0x613: // Brusa NLG5 variables, need to check the byte ordering
+      StandardMetrics.ms_v_charge_temp->SetValue( ((unsigned int) d[0] << 8) + d[1] ); // Power stage temperature
+      break;
+
+
     default:
       break;
     }
   }
+
+OvmsVehicle::vehicle_command_t OvmsVehicleZeva::CommandStartCharge()
+  {
+  CAN_frame_t frame;
+  memset(&frame,0,sizeof(frame));
+
+  frame.origin = m_can1;
+  frame.FIR.U = 0;
+  frame.FIR.B.DLC = 7;
+  frame.FIR.B.FF = CAN_frame_std;
+  frame.MsgID = 0x618;
+  frame.data.u8[0] = 0x00;
+  frame.data.u8[1] = 0x00;
+  frame.data.u8[2] = 0x00;
+  frame.data.u8[3] = 0x00;
+  frame.data.u8[4] = 0x00; //(uint8_t)limit;
+  frame.data.u8[5] = 0x00;
+  frame.data.u8[6] = 0x00;
+  m_can1->Write(&frame);
+
+  return Success;
+  }
+
+OvmsVehicle::vehicle_command_t OvmsVehicleZeva::CommandStopCharge()
+  {
+  CAN_frame_t frame;
+  memset(&frame,0,sizeof(frame));
+
+  frame.origin = m_can1;
+  frame.FIR.U = 0;
+  frame.FIR.B.DLC = 7;
+  frame.FIR.B.FF = CAN_frame_std;
+  frame.MsgID = 0x618;
+  frame.data.u8[0] = 0x00;
+  frame.data.u8[1] = 0x00;
+  frame.data.u8[2] = 0x00;
+  frame.data.u8[3] = 0x00;
+  frame.data.u8[4] = 0x00;
+  frame.data.u8[5] = 0x00;
+  frame.data.u8[6] = 0x00;
+  m_can1->Write(&frame);
+
+  return Success;
+  }
+
 
 void OvmsVehicleZeva::Ticker1(uint32_t ticker)
   {

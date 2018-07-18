@@ -42,9 +42,16 @@ class OvmsVehicleZeva : public OvmsVehicle
   public:
     virtual void Ticker1(uint32_t ticker);
     virtual void Ticker10(uint32_t ticker);
+  
 
   public:
     void IncomingFrameCan1(CAN_frame_t* p_frame);
+
+  public:
+    virtual vehicle_command_t CommandStartCharge();
+    virtual vehicle_command_t CommandStopCharge();
+
+
   };
 
 #endif //#ifndef __VEHICLE_ZEVA_H__
