@@ -33,6 +33,8 @@ static const char *TAG = "peripherals";
 
 #include <stdio.h>
 #include <string.h>
+#include <cstdio>
+#include "ovms_config.h"
 #include "ovms_command.h"
 #include "esp_intr_alloc.h"
 #include "driver/gpio.h"
@@ -44,6 +46,24 @@ Peripherals::Peripherals()
   ESP_LOGI(TAG, "Initialising OVMS Peripherals...");
 
 #if defined(CONFIG_OVMS_COMP_WIFI)||defined(CONFIG_OVMS_COMP_MODEM_SIMCOM)
+  if (MyConfig.IsDefined("network","mac"))
+    {
+    std::string mac = MyConfig.GetParamValue("network", "mac");
+    int mac_addr_k[6];
+    uint8_t mac_addr[8];
+    memset(mac_addr,0,sizeof(mac_addr));
+    if (std::sscanf(mac.c_str(),
+                    "%02x:%02x:%02x:%02x:%02x:%02x",
+                    &mac_addr_k[0], &mac_addr_k[1], &mac_addr_k[2],
+                    &mac_addr_k[3], &mac_addr_k[4], &mac_addr_k[5]) == 6)
+      {
+      for (int k=0;k<6;k++) mac_addr[k] = mac_addr_k[k];
+      esp_base_mac_addr_set(mac_addr);
+      ESP_LOGI(TAG, "  Base network MAC address: %02x:%02x:%02x:%02x:%02x:%02x",
+        mac_addr[0], mac_addr[1], mac_addr[2],
+        mac_addr[3], mac_addr[4], mac_addr[5]);
+      }
+    }
   ESP_LOGI(TAG, "  TCP/IP Adaptor");
   tcpip_adapter_init();
 #endif // #if defined(CONFIG_OVMS_COMP_WIFI)||defined(CONFIG_OVMS_COMP_MODEM_SIMCOM)
@@ -56,6 +76,7 @@ Peripherals::Peripherals()
 
 #ifdef CONFIG_OVMS_COMP_MAX7317
   gpio_set_direction((gpio_num_t)VSPI_PIN_MAX7317_CS, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)VSPI_PIN_MAX7317_CS, 1); // to prevent SPI crosstalk during initialization
 #endif // #ifdef CONFIG_OVMS_COMP_MAX7317
 
 #ifdef CONFIG_OVMS_COMP_MCP2515
@@ -63,7 +84,15 @@ Peripherals::Peripherals()
   gpio_set_direction((gpio_num_t)VSPI_PIN_MCP2515_2_CS, GPIO_MODE_OUTPUT);
   gpio_set_direction((gpio_num_t)VSPI_PIN_MCP2515_1_INT, GPIO_MODE_INPUT);
   gpio_set_direction((gpio_num_t)VSPI_PIN_MCP2515_2_INT, GPIO_MODE_INPUT);
+  gpio_set_level((gpio_num_t)VSPI_PIN_MCP2515_1_CS, 1); // to prevent SPI crosstalk during initialization
+  gpio_set_level((gpio_num_t)VSPI_PIN_MCP2515_2_CS, 1); // to prevent SPI crosstalk during initialization
 #endif // #ifdef CONFIG_OVMS_COMP_MCP2515
+
+#ifdef CONFIG_OVMS_COMP_EXTERNAL_SWCAN
+  gpio_set_direction((gpio_num_t)VSPI_PIN_MCP2515_SWCAN_CS, GPIO_MODE_OUTPUT);
+  gpio_set_direction((gpio_num_t)VSPI_PIN_MCP2515_SWCAN_INT, GPIO_MODE_INPUT);
+  gpio_set_level((gpio_num_t)VSPI_PIN_MCP2515_SWCAN_CS, 1); // to prevent SPI crosstalk during initialization
+#endif // #ifdef CONFIG_OVMS_COMP_EXTERNAL_SWCAN
 
 #ifdef CONFIG_OVMS_COMP_SDCARD
   gpio_set_direction((gpio_num_t)SDCARD_PIN_CLK, GPIO_MODE_OUTPUT);
@@ -114,6 +143,13 @@ Peripherals::Peripherals()
   ESP_LOGI(TAG, "  MCP2515 CAN 2/2");
   m_mcp2515_2 = new mcp2515("can3", m_spibus, VSPI_NODMA_HOST, 10000000, VSPI_PIN_MCP2515_2_CS, VSPI_PIN_MCP2515_2_INT);
 #endif // #ifdef CONFIG_OVMS_COMP_MCP2515
+
+#ifdef CONFIG_OVMS_COMP_EXTERNAL_SWCAN
+  ESP_LOGI(TAG, "  can4/swcan (MCP2515 + TH8056 DRIVER)");
+
+  // External SWCAN module with MCP2515. Here we use software CS (maximum 3 HW CS pins already used)
+  m_mcp2515_swcan = new swcan("can4", m_spibus, VSPI_NODMA_HOST, 10000000, VSPI_PIN_MCP2515_SWCAN_CS, VSPI_PIN_MCP2515_SWCAN_INT, false);
+#endif // #ifdef CONFIG_OVMS_COMP_EXTERNAL_SWCAN
 
 #ifdef CONFIG_OVMS_COMP_SDCARD
   ESP_LOGI(TAG, "  SD CARD");

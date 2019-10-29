@@ -43,8 +43,66 @@ config OVMS_HW_SPIMEM_AGGRESSIVE
     help
         Enable to aggressively allocate from SPI RAM (rather than internal RAM).
 
+config OVMS_HW_CONSOLE_QUEUE_SIZE
+    int "Console queue size"
+    default 100
+    depends on OVMS
+    help
+        The size of the console defer queue. If more than this number
+        of alert are raised in a very short period of time, excess
+        alerts may be dropped (with suitable warning).
+
+config OVMS_HW_ASYNC_QUEUE_SIZE
+    int "Async async terminal queue size"
+    default 100
+    depends on OVMS
+    help
+        The size of the async terminal queue. If more than this number
+        of alert are raised in a very short period of time, excess
+        alerts may be dropped (with suitable warning).
+
+config OVMS_HW_EVENT_QUEUE_SIZE
+    int "EVENT queue size"
+    default 20
+    depends on OVMS
+    help
+        The size of the EVENT queue.
+
+config OVMS_HW_NETMANAGER_QUEUE_SIZE
+    int "NETMANAGER queue size"
+    default 10
+    depends on OVMS
+    help
+        The size of the NETMANAGER queue.
+
+config OVMS_HW_CAN_RX_QUEUE_SIZE
+    int "CAN bus RX queue size"
+    default 30
+    depends on OVMS
+    help
+        The size of the CAN bus RX queue.
+
+config OVMS_HW_CAN_TX_QUEUE_SIZE
+    int "CAN bus TX queue size"
+    default 20
+    depends on OVMS
+    help
+        The size of the CAN bus TX queue.
+
 endmenu # Hardware Support
 
+
+menu "System Options"
+    depends on OVMS
+
+config OVMS_SYS_COMMAND_STACK_SIZE
+    int "Stack size for command execution"
+    default 6144
+    depends on OVMS
+    help
+        The stack size of the OVMS Console and dynamic command tasks.
+
+endmenu # System Options
 
 
 menu "Library Support"
@@ -92,6 +150,14 @@ config MG_ENABLE_DIRECTORY_LISTING
     help
         Enable MONGOOSE directory listing support
 
+config MG_ENABLE_SSL
+    bool "Enable MONGOOSE SSL/TSL support"
+    default n
+    depends on OVMS_SC_GPL_MONGOOSE
+    depends on MBEDTLS_PSK_MODES
+    help
+        Enable MONGOOSE SSL/TSL support
+
 config MG_ENABLE_DEBUG
     bool "Enable MONGOOSE debug logging"
     default n
@@ -107,6 +173,38 @@ config OVMS_SC_GPL_WOLF
     help
         Enable to include the GPL licensed WOLFSSH and WOLFSSL libraries
         (required for SSH server functionality)
+
+config OVMS_SC_ZIP
+    bool "Include ZIP archive support"
+    default y
+    depends on OVMS
+    help
+        Enable to include zip archive support for config backup & restore.
+        This is based on libzip by Dieter Baron and Thomas Klausner and
+        zlib by Jean-loup Gailly and Mark Adler.
+
+config OVMS_SC_JAVASCRIPT_DUKTAPE_STACK
+    int "JavaScript (DukTape) task stack size"
+    default 12288
+    depends on OVMS_SC_JAVASCRIPT_DUKTAPE
+    help
+        Stack size for the DukTape task ("OVMS DukTape").
+        The DukTape task runs the javascript framework.
+
+config OVMS_SC_JAVASCRIPT_DUKTAPE_QUEUE_SIZE
+    int "JavaScript (DukTape) task queue size"
+    default 20
+    depends on OVMS_SC_JAVASCRIPT_DUKTAPE
+    help
+        The size of the DukTape queue (for outstanding requests).
+
+config OVMS_SC_JAVASCRIPT_DUKTAPE_PRIORITY
+    int "JavaScript (DukTape) task priority"
+    default 3
+    depends on OVMS_SC_JAVASCRIPT_DUKTAPE
+    help
+        Priority for the DukTape task ("OVMS DukTape").
+        The DukTape task runs the javascript framework.
 
 endmenu # Library support
 
@@ -157,6 +255,13 @@ config OVMS_VEHICLE_TESLAMODELS
     help
         Enable to include support for Tesla Model S vehicles.
 
+config OVMS_VEHICLE_TESLAMODEL3
+    bool "Include support for Tesla Model 3 vehicles"
+    default y
+    depends on OVMS
+    help
+        Enable to include support for Tesla Model 3 vehicles.
+
 config OVMS_VEHICLE_NISSANLEAF
     bool "Include support for Nissan Leaf vehicles"
     default y
@@ -171,6 +276,14 @@ config OVMS_VEHICLE_RENAULTTWIZY
     depends on OVMS_COMP_CANOPEN
     help
         Enable to include support for Renault Twizy vehicles.
+
+config OVMS_VEHICLE_RENAULTZOE
+    bool "Include support for Renault Zoe vehicles"
+    default y
+    depends on OVMS
+    depends on OVMS_COMP_CANOPEN
+    help
+        Enable to include support for Renault Zoe vehicles.
 
 config OVMS_VEHICLE_KIASOULEV
     bool "Include support for Kia Soul EV vehicles"
@@ -193,6 +306,20 @@ config OVMS_VEHICLE_THINKCITY
     help
         Enable to include support for Think City vehicles.
 
+config OVMS_VEHICLE_SMARTED
+    bool "Include support for Smart ED vehicle"
+    default y
+    depends on OVMS
+    help
+        Enable to include support for Smart ED vehicle.
+
+config OVMS_VEHICLE_SMARTEQ
+    bool "Include support for Smart ED/EQ Gen.4 vehicle"
+    default y
+    depends on OVMS
+    help
+        Enable to include support for Smart ED/EQ Gen.4 vehicle.
+
 config OVMS_VEHICLE_MITSUBISHI
     bool "Include support for Mitsubishi iMiev vehicle"
     default y
@@ -201,11 +328,19 @@ config OVMS_VEHICLE_MITSUBISHI
         Enable to include support for Mitsubishi iMiev vehicle.
 
 config OVMS_VEHICLE_ZEVA
-    bool "Include support for vehicle with Zeva BMS"
+    bool "Include support for vehicles using Zeva BMS"
     default y
     depends on OVMS
     help
-        Enable to include support for vehicle with Zeva BMS.
+        Enable to include support for vehicles using Zeva BMS.
+
+config OVMS_VEHICLE_KIANIROEV
+    bool "Include support for Kia e-Niro"
+    default y
+    depends on OVMS
+    depends on OVMS_VEHICLE_KIASOULEV
+    help
+        Enable to include support for Kia e-Niro.
 
 config OVMS_VEHICLE_FIAT500
     bool "Include support for Fiat 500 vehicle"
@@ -223,6 +358,13 @@ config OVMS_VEHICLE_RXTASK_STACK
         The RX task triggers events and metrics updates so needs to be
         able to process the attached event/metrics listeners.
         Standard stack usage of this task is currently around 1400 bytes.
+
+config OVMS_VEHICLE_CAN_RX_QUEUE_SIZE
+    int "Vehicle CAN queue size"
+    default 40
+    depends on OVMS
+    help
+        The size of the CAN bus RX queue (at the vehicle component).
 
 endmenu # Vehicle Support
 
@@ -266,6 +408,13 @@ config OVMS_COMP_MCP2515
     depends on OVMS
     help
         Enable to include support for MCP2515 CAN controllers (can2, can3).
+
+config OVMS_COMP_EXTERNAL_SWCAN
+    bool "Include support for external SWCAN module (swcan bus)"
+    default n
+    depends on OVMS
+    help
+        Enable to include support for external SWCAN module. Replaces the second internal MCP2515 CAN controller
 
 config OVMS_COMP_ADC
     bool "Include support for ADC (reading 12V line voltage)"
@@ -343,6 +492,13 @@ config OVMS_COMP_SSH
     depends on OVMS_SC_GPL_MONGOOSE
     help
         Enable to include support for SSH server.
+
+config OVMS_COMP_PUSHOVER
+    bool "Include support for Pushover notification system"
+    default y
+    depends on MG_ENABLE_SSL
+    help
+        Enable to include support for Pushover. 
 
 config OVMS_COMP_MODEM_SIMCOM
     bool "Include support for SIMCOM modems"
@@ -423,7 +579,7 @@ config OVMS_DEV_CONFIGVFS
     help
         Enable to permit VFS access to configuration files (danger: insecure)
 
-config OMMS_DEV_SDCARDSCRIPTS
+config OVMS_DEV_SDCARDSCRIPTS
     bool "Run event scripts from /sd, as well as /store (note: may be insecure)"
     default n
     depends on OVMS

@@ -41,9 +41,25 @@
 #include <sstream>
 #include "ovms_malloc.h"
 
+#ifdef CONFIG_FREERTOS_UNICORE
+  #define CORE(n) (0)
+#else
+  #define CORE(n) (n)
+#endif
+
 extern uint32_t monotonictime;
 
 class ExternalRamAllocated
+  {
+  public:
+    static void* operator new(std::size_t sz);
+    static void* operator new[](std::size_t sz);
+    static char* strdup(const char* src);
+    static int asprintf(char** strp, const char* fmt, ...);
+    static int vasprintf(char** strp, const char* fmt, va_list ap);
+  };
+
+class InternalRamAllocated
   {
   public:
     static void* operator new(std::size_t sz);

@@ -30,6 +30,8 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <dirent.h>
 #include "ovms_utils.h"
 
 /**
@@ -202,6 +204,43 @@ extram::string mp_encode(const extram::string text)
   }
 
 /**
+ * stripcr:
+ *  - replace '\r\n' by '\n'
+ */
+extram::string stripcr(const extram::string& text)
+  {
+  extram::string res;
+  res.reserve(text.length());
+  for (int i = 0; i < text.length(); i++)
+    {
+    if (text[i] != '\r' || (i < text.length()-1 && text[i+1] != '\n'))
+      res += text[i];
+    }
+  return res;
+  }
+
+/**
+ * stripesc: remove terminal escape sequences from (log) string
+ */
+std::string stripesc(const char* s)
+  {
+  std::string res;
+  res.reserve(200);
+  bool skip = false;
+  while (s && *s)
+    {
+    if (*s == '\033' && *(s+1) == '[')
+      skip = true;
+    else if (!skip)
+      res += *s;
+    else if (*s == 'm')
+      skip = false;
+    ++s;
+    }
+  return res;
+  }
+
+/**
  * startsWith: std::string prefix check
  */
 bool startsWith(const std::string& haystack, const std::string& needle)
@@ -209,12 +248,48 @@ bool startsWith(const std::string& haystack, const std::string& needle)
   return needle.length() <= haystack.length()
     && std::equal(needle.begin(), needle.end(), haystack.begin());
   }
+bool startsWith(const std::string& haystack, const char needle)
+  {
+  return !haystack.empty() && haystack.front() == needle;
+  }
+
+/**
+ * endsWith: std::string suffix check
+ */
+bool endsWith(const std::string& haystack, const std::string& needle)
+  {
+  return needle.length() <= haystack.length()
+    && std::equal(needle.begin(), needle.end(), haystack.end() - needle.length());
+  }
+bool endsWith(const std::string& haystack, const char needle)
+  {
+  return !haystack.empty() && haystack.back() == needle;
+  }
+
+/**
+ * HexByte: Write a single byte as two hexadecimal characters
+ * Returns new pointer to end of string (p + 2)
+ */
+char* HexByte(char* p, uint8_t byte)
+  {
+  uint8_t nibble;
+
+  nibble = byte >> 4;   // high nibble
+  nibble += '0'; if (nibble>'9') nibble += 39;
+  *p = nibble; p++;
+
+  nibble = byte & 0x0f; // low nibble
+  nibble += '0'; if (nibble>'9') nibble += 39;
+  *p = nibble; p++;
+  return p;
+  }
 
 /**
  * FormatHexDump: create/fill hexdump buffer including printable representation
  * Note: allocates buffer as necessary in *bufferp, caller must free.
+ * Returns new remaining length
  */
-int FormatHexDump(char** bufferp, const char* data, size_t rlength, size_t colsize /*=16*/)
+size_t FormatHexDump(char** bufferp, const char* data, size_t rlength, size_t colsize /*=16*/)
   {
   const char *s = data;
 
@@ -258,34 +333,15 @@ int FormatHexDump(char** bufferp, const char* data, size_t rlength, size_t colsi
       p++;
       }
     *p = 0;
-    rlength -= colsize;
+    if (rlength > colsize)
+      rlength -= colsize;
+    else
+      rlength = 0;
     }
 
   return rlength;
   }
 
-/**
- * json_encode: encode string for JSON transport (see http://www.json.org/)
- */
-std::string json_encode(const std::string text)
-  {
-  std::string buf;
-  for (int i=0; i<text.size(); i++)
-    {
-    switch(text[i])
-      {
-      case '\n':        buf += "\\n"; break;
-      case '\r':        buf += "\\r"; break;
-      case '\t':        buf += "\\t"; break;
-      case '\b':        buf += "\\b"; break;
-      case '\f':        buf += "\\f"; break;
-      case '\"':        buf += "\\\""; break;
-      case '\\':        buf += "\\\\"; break;
-      default:          buf += text[i]; break;
-      }
-    }
-	return buf;
-  }
 
 /**
  * pwgen: simple password generator
@@ -309,4 +365,128 @@ std::string pwgen(int length)
       res.push_back((char)cs3[(int)(drand48()*(sizeof(cs3)-1))]);
     }
   return res;
+  }
+
+
+#ifdef CONFIG_FREERTOS_USE_TRACE_FACILITY
+/**
+ * TaskGetHandle: get task handle by name
+ * (FreeRTOS xTaskGetHandle() is not available)
+ */
+TaskHandle_t TaskGetHandle(const char *name)
+  {
+  TaskHandle_t res = 0;
+  TaskStatus_t* pxTaskStatusArray;
+  volatile UBaseType_t uxArraySize, x;
+
+  uxArraySize = uxTaskGetNumberOfTasks();
+  pxTaskStatusArray = (TaskStatus_t*)pvPortMalloc(uxArraySize * sizeof(TaskStatus_t));
+  if (pxTaskStatusArray != NULL)
+    {
+    uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, NULL);
+    for (x = 0; x < uxArraySize; x++)
+      {
+      if (strcmp(pxTaskStatusArray[x].pcTaskName, name) == 0)
+        {
+        res = pxTaskStatusArray[x].xHandle;
+        break;
+        }
+      }
+    vPortFree( pxTaskStatusArray );
+    }
+  return res;
+  }
+#endif // CONFIG_FREERTOS_USE_TRACE_FACILITY
+
+
+/**
+ * mkpath: mkdir -p
+ *
+ * Original: https://stackoverflow.com/a/12904145
+ */
+int mkpath(std::string path, mode_t mode /*=0*/)
+  {
+  size_t pre = 0, pos;
+  std::string dir;
+  int mdret;
+
+  if (!endsWith(path, '/'))
+    {
+    // force trailing / so we can handle everything in loop
+    path.append("/");
+    }
+
+  while ((pos = path.find_first_of('/', pre)) != std::string::npos)
+    {
+    dir = path.substr(0, pos++);
+    pre = pos;
+    if (dir.size() == 0)
+      continue; // if leading / first time is 0 length
+    if ((mdret = mkdir(dir.c_str(), mode)) && errno != EEXIST)
+      return mdret;
+    }
+
+  return 0;
+  }
+
+/**
+ * rmtree: rmdir -r
+ */
+int rmtree(const std::string path)
+  {
+  DIR *dir = opendir(path.c_str());
+  if (!dir)
+    return 0;
+
+  struct dirent *dp;
+  struct stat st;
+  std::string sub;
+  bool ok = true;
+
+  while ((dp = readdir(dir)) != NULL) {
+    sub = path + "/" + dp->d_name;
+    if (stat(sub.c_str(), &st)) {
+      ok = false;
+      break;
+    }
+    if (S_ISDIR(st.st_mode))
+      ok = (rmtree(sub) == 0);
+    else
+      ok = (unlink(sub.c_str()) == 0);
+    if (!ok)
+      break;
+  }
+
+  closedir(dir);
+  ok = (rmdir(path.c_str()) == 0);
+  return ok ? 0 : -1;
+  }
+
+/**
+ * path_exists: check if filesystem path exists
+ */
+bool path_exists(const std::string path)
+  {
+  struct stat st;
+  return (stat(path.c_str(), &st) == 0);
+  }
+
+
+/**
+ * mqtt_topic: convert dotted string (e.g. notification subtype) to MQTT topic
+ *  - replace '.' by '/'
+ */
+std::string mqtt_topic(const std::string text)
+  {
+  std::string buf;
+  buf.reserve(text.size());
+  for (int i=0; i<text.size(); i++)
+    {
+    switch(text[i])
+      {
+      case '.':         buf += '/'; break;
+      default:          buf += text[i]; break;
+      }
+    }
+	return buf;
   }

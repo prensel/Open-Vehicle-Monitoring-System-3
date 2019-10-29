@@ -43,9 +43,9 @@ static const char *TAG = "esp32can";
 
 esp32can* MyESP32can = NULL;
 
-static void ESP32CAN_rxframe(esp32can *me)
+static IRAM_ATTR void ESP32CAN_rxframe(esp32can *me)
   {
-  CAN_msg_t msg;
+  CAN_queue_msg_t msg;
 
   while (MODULE_ESP32CAN->SR.B.RBS)
     {
@@ -83,7 +83,7 @@ static void ESP32CAN_rxframe(esp32can *me)
     }
   }
 
-static void ESP32CAN_isr(void *pvParameters)
+static IRAM_ATTR void ESP32CAN_isr(void *pvParameters)
   {
   esp32can *me = (esp32can*)pvParameters;
 
@@ -96,9 +96,10 @@ static void ESP32CAN_isr(void *pvParameters)
   if ((interrupt & __CAN_IRQ_TX) != 0)
     {
   	// Request TxCallback:
-    CAN_msg_t msg;
+    CAN_queue_msg_t msg;
     msg.type = CAN_txcallback;
     msg.body.bus = me;
+    msg.body.frame = me->tx_frame;
     xQueueSendFromISR(MyCan.m_rxqueue, &msg, 0);
     }
 
@@ -125,7 +126,7 @@ static void ESP32CAN_isr(void *pvParameters)
       MODULE_ESP32CAN->CMR.B.CDO = 1;
       }
     // Request error log:
-    CAN_msg_t msg;
+    CAN_queue_msg_t msg;
     msg.type = CAN_logerror;
     msg.body.bus = me;
     xQueueSendFromISR(MyCan.m_rxqueue, &msg, 0);
@@ -146,7 +147,7 @@ esp32can::esp32can(const char* name, int txpin, int rxpin)
   MyESP32can = this;
 
   // Install CAN ISR
-  esp_intr_alloc(ETS_CAN_INTR_SOURCE,0,ESP32CAN_isr,this,NULL);
+  esp_intr_alloc(ETS_CAN_INTR_SOURCE, ESP_INTR_FLAG_IRAM, ESP32CAN_isr, this, NULL);
 
   // Due to startup order, we can't talk to MAX7317 during
   // initialisation. So, we'll just enter reset mode for the
@@ -163,7 +164,19 @@ esp32can::~esp32can()
 
 esp_err_t esp32can::Start(CAN_mode_t mode, CAN_speed_t speed)
   {
+  switch (speed)
+    {
+    case CAN_SPEED_33KBPS:
+    case CAN_SPEED_83KBPS:
+      /* XXX not yet */
+      ESP_LOGW(TAG,"%d not supported",speed);
+      return ESP_FAIL;
+    default:
+      break;
+    }
+
   canbus::Start(mode, speed);
+
   double __tq; // Time quantum
 
   m_mode = mode;
@@ -248,6 +261,9 @@ esp_err_t esp32can::Start(CAN_mode_t mode, CAN_speed_t speed)
   MyPeripherals->m_max7317->Output(MAX7317_CAN1_EN, 0);
 #endif // #ifdef CONFIG_OVMS_COMP_MAX7317
 
+  // clear statistics:
+  ClearStatus();
+
   // Showtime. Release Reset Mode.
   MODULE_ESP32CAN->MOD.B.RM = 0;
 
@@ -259,6 +275,8 @@ esp_err_t esp32can::Start(CAN_mode_t mode, CAN_speed_t speed)
 
 esp_err_t esp32can::Stop()
   {
+  canbus::Stop();
+
 #ifdef CONFIG_OVMS_COMP_MAX7317
   // Power down the matching SN65 transciever
   MyPeripherals->m_max7317->Output(MAX7317_CAN1_EN, 1);
@@ -316,8 +334,10 @@ esp_err_t esp32can::Write(const CAN_frame_t* p_frame, TickType_t maxqueuewait /*
   return ESP_OK;
   }
 
-void esp32can::TxCallback()
+void esp32can::TxCallback(CAN_frame_t* p_frame, bool success)
   {
+  canbus::TxCallback(p_frame, success);
+
   // TX buffer has become available; send next queued frame (if any):
   CAN_frame_t frame;
   if (xQueueReceive(m_txqueue, (void*)&frame, 0) == pdTRUE)

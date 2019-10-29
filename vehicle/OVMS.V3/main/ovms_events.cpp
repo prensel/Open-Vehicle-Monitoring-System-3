@@ -66,12 +66,56 @@ void event_trace(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, 
   writer->printf("Event tracing is now %s\n",cmd->GetName());
   }
 
+void event_list(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
+  {
+  std::string event;
+  for (EventMap::const_iterator itm=MyEvents.Map().begin(); itm != MyEvents.Map().end(); ++itm)
+    {
+    if (argc > 0 && itm->first.find(argv[0]) == std::string::npos)
+      continue;
+    event.append(itm->first);
+    event.append(":  ");
+    EventCallbackList* el = itm->second;
+    for (EventCallbackList::iterator itc=el->begin(); itc!=el->end(); )
+      {
+      EventCallbackEntry* ec = *itc;
+      event.append(ec->m_caller);
+      if (++itc != el->end())
+        event.append(", ");
+      }
+    event.append("\n");
+    }
+  writer->printf("%s", event.c_str());
+  }
+
+int event_validate(OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv, bool complete)
+  {
+  return MyEvents.Map().Validate(writer, argc, argv[0], complete);
+  }
+
 void event_raise(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
   {
-  std::string event(argv[0]);
+  std::string event;
+  uint32_t delay_ms = 0;
 
-  writer->printf("Raising event: %s\n",argv[0]);
-  MyEvents.SignalEvent(event, NULL);
+  for (int i=0; i<argc; i++)
+    {
+    if (argv[i][0]=='-' && argv[i][1]=='d')
+      delay_ms = atol(argv[i]+2);
+    else
+      event = argv[i];
+    }
+
+  if (delay_ms)
+    {
+    writer->printf("Raising event in %u ms: %s\n", delay_ms, argv[0]);
+    MyEvents.SignalEvent(event, NULL, (size_t)0, delay_ms);
+    }
+  else
+    {
+    writer->printf("Raising event: %s\n", argv[0]);
+    MyEvents.SignalEvent(event, NULL);
+    }
   }
 
 OvmsEvents::OvmsEvents()
@@ -87,14 +131,15 @@ OvmsEvents::OvmsEvents()
   ESP_ERROR_CHECK(esp_event_loop_init(ReceiveSystemEvent, (void*)this));
 
   // Register our commands
-  OvmsCommand* cmd_event = MyCommandApp.RegisterCommand("event","EVENT framework",NULL, "", 0, 0, true);
-  cmd_event->RegisterCommand("raise","Raise a textual event",event_raise,"<event>", 1, 1, true);
-  OvmsCommand* cmd_eventtrace = cmd_event->RegisterCommand("trace","EVENT trace framework", NULL, "", 0, 0, true);
-  cmd_eventtrace->RegisterCommand("on","Turn event tracing ON",event_trace,"", 0, 0, true);
-  cmd_eventtrace->RegisterCommand("off","Turn event tracing OFF",event_trace,"", 0, 0, true);
+  OvmsCommand* cmd_event = MyCommandApp.RegisterCommand("event","EVENT framework");
+  cmd_event->RegisterCommand("list","List registered events",event_list,"[<key>]", 0, 1);
+  cmd_event->RegisterCommand("raise","Raise a textual event",event_raise,"[-d<delay_ms>] <event>", 1, 2, true, event_validate);
+  OvmsCommand* cmd_eventtrace = cmd_event->RegisterCommand("trace","EVENT trace framework");
+  cmd_eventtrace->RegisterCommand("on","Turn event tracing ON",event_trace);
+  cmd_eventtrace->RegisterCommand("off","Turn event tracing OFF",event_trace);
 
-  m_taskqueue = xQueueCreate(50,sizeof(event_queue_t));
-  xTaskCreatePinnedToCore(EventLaunchTask, "OVMS Events", 8192, (void*)this, 5, &m_taskid, 1);
+  m_taskqueue = xQueueCreate(CONFIG_OVMS_HW_EVENT_QUEUE_SIZE,sizeof(event_queue_t));
+  xTaskCreatePinnedToCore(EventLaunchTask, "OVMS Events", 8192, (void*)this, 5, &m_taskid, CORE(1));
   AddTaskToMap(m_taskid);
   }
 
@@ -232,7 +277,64 @@ void OvmsEvents::DeregisterEvent(std::string caller)
     }
   }
 
-void OvmsEvents::SignalEvent(std::string event, void* data, event_signal_done_fn callback)
+static void SignalScheduledEvent(TimerHandle_t timer)
+  {
+  event_queue_t* msg = (event_queue_t*) pvTimerGetTimerID(timer);
+  if (xQueueSend(MyEvents.m_taskqueue, msg, 0) != pdTRUE)
+    {
+    ESP_LOGE(TAG, "SignalScheduledEvent: queue overflow, event '%s' dropped", msg->body.signal.event);
+    MyEvents.FreeQueueSignalEvent(msg);
+    }
+  delete msg;
+  }
+
+bool OvmsEvents::ScheduleEvent(event_queue_t* msg, uint32_t delay_ms)
+  {
+  OvmsMutexLock lock(&m_timers_mutex);
+  TimerHandle_t timer;
+  TimerList::iterator it;
+  event_queue_t *msgdup = new event_queue_t(*msg);
+  if (!msgdup)
+    return false;
+  // find available timer:
+  for (it = m_timers.begin(); it != m_timers.end(); it++)
+    {
+    timer = *it;
+    if (xTimerIsTimerActive(timer) == pdFALSE)
+      break;
+    }
+  if (it == m_timers.end())
+    {
+    // create new timer:
+    timer = xTimerCreate("ScheduleEvent", pdMS_TO_TICKS(delay_ms), pdFALSE, msgdup, SignalScheduledEvent);
+    if (!timer)
+      {
+      delete msgdup;
+      return false;
+      }
+    m_timers.push_back(timer);
+    }
+  else
+    {
+    // update timer:
+    if (xTimerChangePeriod(timer, pdMS_TO_TICKS(delay_ms), 0) != pdPASS)
+      {
+      delete msgdup;
+      return false;
+      }
+    vTimerSetTimerID(timer, msgdup);
+    }
+  // start timer:
+  if (xTimerStart(timer, 0) != pdPASS)
+    {
+    delete msgdup;
+    return false;
+    }
+  return true;
+  }
+
+void OvmsEvents::SignalEvent(std::string event, void* data, event_signal_done_fn callback /*=NULL*/,
+                             uint32_t delay_ms /*=0*/)
   {
   event_queue_t msg;
   memset(&msg, 0, sizeof(msg));
@@ -243,14 +345,26 @@ void OvmsEvents::SignalEvent(std::string event, void* data, event_signal_done_fn
   msg.body.signal.data = data;
   msg.body.signal.donefn = callback;
 
-  if (xQueueSend(m_taskqueue, &msg, 0) != pdTRUE)
+  if (delay_ms == 0)
     {
-    ESP_LOGE(TAG, "SignalEvent: queue overflow, event '%s' dropped", msg.body.signal.event);
-    FreeQueueSignalEvent(&msg);
+    if (xQueueSend(m_taskqueue, &msg, 0) != pdTRUE)
+      {
+      ESP_LOGE(TAG, "SignalEvent: queue overflow, event '%s' dropped", msg.body.signal.event);
+      FreeQueueSignalEvent(&msg);
+      }
+    }
+  else
+    {
+    if (ScheduleEvent(&msg, delay_ms) != true)
+      {
+      ESP_LOGE(TAG, "SignalEvent: no timer available, event '%s' dropped", msg.body.signal.event);
+      FreeQueueSignalEvent(&msg);
+      }
     }
   }
 
-void OvmsEvents::SignalEvent(std::string event, void* data, size_t length)
+void OvmsEvents::SignalEvent(std::string event, void* data, size_t length,
+                             uint32_t delay_ms /*=0*/)
   {
   event_queue_t msg;
   memset(&msg, 0, sizeof(msg));
@@ -270,10 +384,21 @@ void OvmsEvents::SignalEvent(std::string event, void* data, size_t length)
     msg.body.signal.donefn = NULL;
     }
 
-  if (xQueueSend(m_taskqueue, &msg, 0) != pdTRUE)
+  if (delay_ms == 0)
     {
-    ESP_LOGE(TAG, "SignalEvent: queue overflow, event '%s' dropped", msg.body.signal.event);
-    FreeQueueSignalEvent(&msg);
+    if (xQueueSend(m_taskqueue, &msg, 0) != pdTRUE)
+      {
+      ESP_LOGE(TAG, "SignalEvent: queue overflow, event '%s' dropped", msg.body.signal.event);
+      FreeQueueSignalEvent(&msg);
+      }
+    }
+  else
+    {
+    if (ScheduleEvent(&msg, delay_ms) != true)
+      {
+      ESP_LOGE(TAG, "SignalEvent: no timer available, event '%s' dropped", msg.body.signal.event);
+      FreeQueueSignalEvent(&msg);
+      }
     }
   }
 
@@ -314,9 +439,9 @@ void OvmsEvents::SignalSystemEvent(system_event_t *event)
       SignalEvent("network.interface.up", NULL);
       SignalEvent("system.wifi.sta.gotip",(void*)&event->event_info,sizeof(event->event_info));
       break;
-//    case SYSTEM_EVENT_STA_LOST_IP:         // ESP32 station lost IP and the IP is reset to 0
-//      SignalEvent("system.wifi.sta.lostip",(void*)&event->event_info);
-//      break;
+    case SYSTEM_EVENT_STA_LOST_IP:         // ESP32 station lost IP and the IP is reset to 0
+      SignalEvent("system.wifi.sta.lostip",(void*)&event->event_info);
+      break;
     case SYSTEM_EVENT_STA_WPS_ER_SUCCESS:  // ESP32 station wps succeeds in enrollee mode
       SignalEvent("system.wifi.sta.wpser.success",(void*)&event->event_info,sizeof(event->event_info));
       break;
@@ -340,6 +465,9 @@ void OvmsEvents::SignalSystemEvent(system_event_t *event)
       break;
     case SYSTEM_EVENT_AP_STADISCONNECTED:  // a station disconnected from ESP32 soft-AP
       SignalEvent("system.wifi.ap.sta.disconnected",(void*)&event->event_info,sizeof(event->event_info));
+      break;
+    case SYSTEM_EVENT_AP_STAIPASSIGNED:    // ESP32 soft-AP assigned an IP to a connected station
+      SignalEvent("system.wifi.ap.sta.ipassigned",(void*)&event->event_info,sizeof(event->event_info));
       break;
     case SYSTEM_EVENT_AP_PROBEREQRECVED:   // Receive probe request packet in soft-AP interface
       SignalEvent("system.wifi.ap.proberx",(void*)&event->event_info,sizeof(event->event_info));

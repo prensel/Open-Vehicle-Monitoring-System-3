@@ -41,12 +41,23 @@ static const char *TAG = "v-twizy";
 
 using namespace std;
 
+// CAN buffer access macros: b=byte# 0..7 / n=nibble# 0..15
+#define CAN_BYTE(b)     can_databuffer[b]
+#define CAN_UINT(b)     (((UINT)CAN_BYTE(b) << 8) | CAN_BYTE(b+1))
+#define CAN_UINT24(b)   (((UINT32)CAN_BYTE(b) << 16) | ((UINT)CAN_BYTE(b+1) << 8) \
+                          | CAN_BYTE(b+2))
+#define CAN_UINT32(b)   (((UINT32)CAN_BYTE(b) << 24) | ((UINT32)CAN_BYTE(b+1) << 16) \
+                          | ((UINT)CAN_BYTE(b+2) << 8) | CAN_BYTE(b+3))
+#define CAN_NIBL(b)     (can_databuffer[b] & 0x0f)
+#define CAN_NIBH(b)     (can_databuffer[b] >> 4)
+#define CAN_NIB(n)      (((n)&1) ? CAN_NIBL((n)>>1) : CAN_NIBH((n)>>1))
+
 
 /**
- * CAN RX handler
+ * Synchronous CAN RX responder
  */
 
-void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
+void OvmsVehicleRenaultTwizy::CanResponder(const CAN_frame_t* p_frame)
 {
   // debug log helpers:
   static bool is_stopping = false;
@@ -56,22 +67,7 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
   if (!m_ready)
     return;
 
-  unsigned int u;
-  int s;
-  
-  uint8_t *can_databuffer = p_frame->data.u8;
-  
-  // CAN buffer access macros: b=byte# 0..7 / n=nibble# 0..15
-  #define CAN_BYTE(b)     can_databuffer[b]
-  #define CAN_UINT(b)     (((UINT)CAN_BYTE(b) << 8) | CAN_BYTE(b+1))
-  #define CAN_UINT24(b)   (((UINT32)CAN_BYTE(b) << 16) | ((UINT)CAN_BYTE(b+1) << 8) \
-                            | CAN_BYTE(b+2))
-  #define CAN_UINT32(b)   (((UINT32)CAN_BYTE(b) << 24) | ((UINT32)CAN_BYTE(b+1) << 16) \
-                            | ((UINT)CAN_BYTE(b+2) << 8) | CAN_BYTE(b+3))
-  #define CAN_NIBL(b)     (can_databuffer[b] & 0x0f)
-  #define CAN_NIBH(b)     (can_databuffer[b] >> 4)
-  #define CAN_NIB(n)      (((n)&1) ? CAN_NIBL((n)>>1) : CAN_NIBH((n)>>1))
-  
+  const uint8_t *can_databuffer = p_frame->data.u8;
   
   switch (p_frame->MsgID)
   {
@@ -97,7 +93,7 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         txframe.Write();
         if (level != last_level) {
           last_level = level;
-          ESP_LOGD(TAG, "IncomingFrameCan1: new charge level %d", level);
+          ESP_LOGV(TAG, "IncomingFrameCan1: new charge level %d", level);
         }
       }
       else
@@ -105,6 +101,56 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         last_level = 0;
       }
       
+      break;
+    }
+
+    case 0x424:
+    {
+      // --------------------------------------------------------------------------
+      // CAN ID 0x424: sent every 100 ms (10 per second)
+      
+      // Overwrite BMS>>CHG protocol to stop charge:
+      // requested by setting twizy_chg_stop_request to true
+      if (twizy_flags.EnableWrite
+        && (twizy_status & (CAN_STATUS_CHARGING|CAN_STATUS_OFFLINE)) == CAN_STATUS_CHARGING
+        && (bool) twizy_chg_stop_request)
+      {
+        CAN_frame_t txframe = *p_frame;
+        txframe.data.u8[0] = 0x12; // charge stop request
+        txframe.Write();
+        if (!is_stopping) {
+          is_stopping = true;
+          ESP_LOGV(TAG, "IncomingFrameCan1: stopping charge");
+        }
+      }
+      else
+      {
+        is_stopping = false;
+      }
+      
+      break;
+    }
+
+  }
+}
+
+
+/**
+ * Asynchronous CAN RX handler
+ */
+
+void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
+{
+  unsigned int u;
+  int s;
+  
+  uint8_t *can_databuffer = p_frame->data.u8;
+  
+  
+  switch (p_frame->MsgID)
+  {
+    case 0x155:
+    {
       // Basic validation:
       // Byte 4:  0x94 = init/exit phase (CAN data invalid)
       //          0x54 = Twizy online (CAN data valid)
@@ -202,8 +248,6 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
       // MOTOR TEMPERATURE:
       if (CAN_BYTE(5) > 0 && CAN_BYTE(5) < 0xf0)
         twizy_tmotor = (signed int) CAN_BYTE(5) - 40;
-      else
-        twizy_tmotor = 0;
       
       break;
     
@@ -221,25 +265,6 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
     case 0x424:
       // --------------------------------------------------------------------------
       // CAN ID 0x424: sent every 100 ms (10 per second)
-      
-      // Overwrite BMS>>CHG protocol to stop charge:
-      // requested by setting twizy_chg_stop_request to true
-      if (twizy_flags.EnableWrite
-        && (twizy_status & (CAN_STATUS_CHARGING|CAN_STATUS_OFFLINE)) == CAN_STATUS_CHARGING
-        && (bool) twizy_chg_stop_request)
-      {
-        CAN_frame_t txframe = *p_frame;
-        txframe.data.u8[0] = 0x12; // charge stop request
-        txframe.Write();
-        if (!is_stopping) {
-          is_stopping = true;
-          ESP_LOGD(TAG, "IncomingFrameCan1: stopping charge");
-        }
-      }
-      else
-      {
-        is_stopping = false;
-      }
       
       // max drive (discharge) + recup (charge) power:
       if (CAN_BYTE(2) != 0xff)
@@ -269,13 +294,13 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         if (twizy_cmod[7].temp_new > 0 && twizy_cmod[7].temp_new < 0xf0) {
           if (batt_cmod_count != 8) {
             batt_cmod_count = 8;
-            *m_batt_cmod_count = (int) batt_cmod_count;
+            BmsSetCellArrangementTemperature(batt_cmod_count, 1);
           }
         }
         else {
           if (batt_cmod_count != 7) {
             batt_cmod_count = 7;
-            *m_batt_cmod_count = (int) batt_cmod_count;
+            BmsSetCellArrangementTemperature(batt_cmod_count, 1);
           }
         }
         
@@ -421,8 +446,6 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
       // CHARGER temperature:
       if (CAN_BYTE(7) > 0 && CAN_BYTE(7) < 0xf0)
         *StdMetrics.ms_v_charge_temp = (float) CAN_BYTE(7) - 40;
-      else
-        *StdMetrics.ms_v_charge_temp = (float) 0;
       
       break; // case 0x597
     
@@ -485,6 +508,7 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         
         twizy_speed = u;
         *StdMetrics.ms_v_pos_speed = (float) twizy_speed / 100;
+        CalculateAcceleration();
       }
       
       break; // case 0x599
@@ -542,8 +566,6 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
       // SEVCON TEMPERATURE:
       if (CAN_BYTE(5) > 0 && CAN_BYTE(5) < 0xf0)
         *StdMetrics.ms_v_inv_temp = (float) CAN_BYTE(5) - 40;
-      else
-        *StdMetrics.ms_v_inv_temp = (float) 0;
       
       break;
     
@@ -555,9 +577,41 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         | ((unsigned long) CAN_BYTE(4) << 4)
         | ((unsigned long) CAN_BYTE(3) << 12)
         | ((unsigned long) CAN_BYTE(2) << 20);
+      if (!twizy_odometer_tripstart)
+        twizy_odometer_tripstart = twizy_odometer;
       break;
       
       
+    case 0x627:
+      // --------------------------------------------------------------------------
+      // *** CHARGER status ***
+      // sent every 100 ms (10 per second) in drive & charge mode
+      mt_charger_status->SetValue(CAN_UINT24(0));
+      break;
+
+
+    case 0x628:
+      // --------------------------------------------------------------------------
+      // *** BMS status ***
+      // sent every 100 ms (10 per second) in drive & charge mode
+      mt_bms_status->SetValue(CAN_UINT24(0));
+      mt_bms_alert_12v->SetValue((CAN_BYTE(2) & 0x20) == 0x20);
+      mt_bms_alert_batt->SetValue((CAN_BYTE(2) & 0x40) == 0x40);
+      mt_bms_alert_temp->SetValue((CAN_BYTE(2) & 0x80) == 0x80);
+      break;
+
+
+    case 0x629:
+      // --------------------------------------------------------------------------
+      // *** SEVCON status ***
+      // sent every 100 ms (10 per second) while SEVCON is running
+      mt_sevcon_status->SetValue(CAN_UINT24(0));
+      if (m_sevcon)
+        m_sevcon->QueryMonitoringData();
+      break;
+
+
+#if 0
     case 0x69F:
       // --------------------------------------------------------------------------
       // *** VIN ***
@@ -576,6 +630,7 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         *StdMetrics.ms_v_vin = (string) twizy_vin;
       }
       break;
+#endif
     
     
     case 0x700:
@@ -597,19 +652,19 @@ void OvmsVehicleRenaultTwizy::IncomingFrameCan1(CAN_frame_t* p_frame)
         if (twizy_cell[15].volt_new != 0 && twizy_cell[15].volt_new != 0x0fff) {
           if (batt_cell_count != 16) {
             batt_cell_count = 16;
-            *m_batt_cell_count = (int) batt_cell_count;
+            BmsSetCellArrangementVoltage(batt_cell_count, 1);
           }
         }
         else if (twizy_cell[14].volt_new != 0 && twizy_cell[14].volt_new != 0x0fff) {
           if (batt_cell_count != 15) {
             batt_cell_count = 15;
-            *m_batt_cell_count = (int) batt_cell_count;
+            BmsSetCellArrangementVoltage(batt_cell_count, 1);
           }
         }
         else {
           if (batt_cell_count != 14) {
             batt_cell_count = 14;
-            *m_batt_cell_count = (int) batt_cell_count;
+            BmsSetCellArrangementVoltage(batt_cell_count, 2);
           }
         }
 

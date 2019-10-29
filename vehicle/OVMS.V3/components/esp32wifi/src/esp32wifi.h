@@ -50,7 +50,7 @@ typedef enum {
     ESP32WIFI_MODE_MAX
 } esp32wifi_mode_t;
 
-class esp32wifi : public pcp
+class esp32wifi : public pcp, public InternalRamAllocated
   {
   public:
     esp32wifi(const char* name);
@@ -58,11 +58,10 @@ class esp32wifi : public pcp
 
   public:
     void AutoInit();
+    void Restart();
     void SetPowerMode(PowerMode powermode);
     void PowerUp();
     void PowerDown();
-    void InitCSI();
-    static void CSIRxCallback(void* ctx, wifi_csi_info_t* data);
 
   public:
     void StartClientMode(std::string ssid, std::string password, uint8_t* bssid=NULL);
@@ -75,9 +74,13 @@ class esp32wifi : public pcp
     std::string GetSSID();
     std::string GetAPSSID();
     void UpdateNetMetrics();
+    void AdjustTaskPriority();
 
   public:
+    void EventWifiStaState(std::string event, void* data);
     void EventWifiGotIp(std::string event, void* data);
+    void EventWifiLostIp(std::string event, void* data);
+    void EventWifiStaConnected(std::string event, void* data);
     void EventWifiStaDisconnected(std::string event, void* data);
     void EventWifiApState(std::string event, void* data);
     void EventWifiApUpdate(std::string event, void* data);
@@ -91,6 +94,7 @@ class esp32wifi : public pcp
     bool m_poweredup;
     OvmsMutex m_mutex;
     esp32wifi_mode_t m_mode;
+    uint8_t m_previous_reason;
     uint8_t m_mac_sta[6];
     uint8_t m_mac_ap[6];
     tcpip_adapter_ip_info_t m_ip_info_sta;
@@ -100,6 +104,8 @@ class esp32wifi : public pcp
     wifi_config_t m_wifi_sta_cfg;
     bool m_stareconnect;
     uint32_t m_nextscan;
+    bool m_sta_connected;
+    wifi_ap_record_t m_sta_ap_info;
     int m_sta_rssi;                               // smoothed RSSI [dBm/10]
   };
 

@@ -41,6 +41,12 @@ static const char *TAG = "config";
 #include "ovms_config.h"
 #include "ovms_command.h"
 #include "ovms_events.h"
+#include "ovms_utils.h"
+#include "ovms_boot.h"
+
+#ifdef CONFIG_OVMS_SC_ZIP
+#include "zip_archive.h"
+#endif // CONFIG_OVMS_SC_ZIP
 
 #define OVMS_CONFIGPATH "/store/ovms_config"
 #define OVMS_MAXVALSIZE 2500
@@ -61,6 +67,16 @@ void store_unmount(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc
   writer->puts("Unmounted STORE");
   }
 
+int config_validate(OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv, bool complete)
+  {
+  if (!MyConfig.ismounted())
+    return -1;
+  if (argc == 1)
+    return MyConfig.m_map.Validate(writer, argc, argv[0], complete);
+  OvmsConfigParam* p = MyConfig.m_map.FindUniquePrefix(argv[0]);
+  return p->m_map.Validate(writer, argc, argv[1], complete);
+  }
+
 void config_list(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
   {
   if (!MyConfig.ismounted()) return;
@@ -79,7 +95,7 @@ void config_list(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, 
     OvmsConfigParam *p = MyConfig.CachedParam(argv[0]);
     if (p)
       {
-      writer->printf("%s (%s %s)\n",argv[0],
+      writer->printf("%s (%s %s)\n",p->GetName().c_str(),
         (p->Readable()?"readable":"protected"),
         (p->Writable()?"writeable":"read-only"));
       for (ConfigParamMap::iterator it=p->m_map.begin(); it!=p->m_map.end(); ++it)
@@ -146,18 +162,88 @@ void config_rm(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, co
   writer->printf("Parameter %s has been removed.\n", argv[0]);
   }
 
+#ifdef CONFIG_OVMS_SC_ZIP
+void config_backup(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
+  {
+  if (!MyConfig.ismounted())
+    {
+    writer->puts("Error: config store not mounted");
+    return;
+    }
+
+  // check path:
+  if (MyConfig.ProtectedPath(argv[0]))
+    {
+    writer->printf("Error: path '%s' is protected\n", argv[0]);
+    return;
+    }
+
+  // get password:
+  std::string password;
+  if (argc >= 2)
+    password = argv[1];
+  else
+    password = MyConfig.GetParamValue("password", "module");
+
+  MyConfig.Backup(argv[0], password, writer, verbosity);
+  }
+
+void config_restore(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
+  {
+  if (!MyConfig.ismounted())
+    {
+    writer->puts("Error: config store not mounted");
+    return;
+    }
+
+  // check path:
+  if (MyConfig.ProtectedPath(argv[0]))
+    {
+    writer->printf("Error: path '%s' is protected\n", argv[0]);
+    return;
+    }
+
+  // get password:
+  std::string password;
+  if (argc >= 2)
+    password = argv[1];
+  else
+    password = MyConfig.GetParamValue("password", "module");
+
+  MyConfig.Restore(argv[0], password, writer, verbosity);
+  }
+#endif // CONFIG_OVMS_SC_ZIP
+
 OvmsConfig::OvmsConfig()
   {
   ESP_LOGI(TAG, "Initialising CONFIG (1400)");
 
-  OvmsCommand* cmd_store = MyCommandApp.RegisterCommand("store","STORE framework",NULL,"",0,0,true);
-  cmd_store->RegisterCommand("mount","Mount STORE",store_mount,"",0,0,true);
-  cmd_store->RegisterCommand("unmount","Unmount STORE",store_unmount,"",0,0,true);
+  m_mounted = false;
 
-  OvmsCommand* cmd_config = MyCommandApp.RegisterCommand("config","CONFIG framework",NULL,"",0,0,true);
-  cmd_config->RegisterCommand("list","Show configuration parameters/instances",config_list,"[<param>]",0,1,true);
-  cmd_config->RegisterCommand("set","Set parameter:instance=value",config_set,"<param> <instance> <value>",3,3,true);
-  cmd_config->RegisterCommand("rm","Remove parameter:instance",config_rm,"<param> {<instance> | *}",2,2,true);
+  OvmsCommand* cmd_store = MyCommandApp.RegisterCommand("store","STORE framework");
+  cmd_store->RegisterCommand("mount","Mount STORE",store_mount);
+  cmd_store->RegisterCommand("unmount","Unmount STORE",store_unmount);
+
+  OvmsCommand* cmd_config = MyCommandApp.RegisterCommand("config","CONFIG framework");
+  cmd_config->RegisterCommand("list","Show configuration parameters/instances",config_list,"[<param>]",0,1, true, config_validate);
+  cmd_config->RegisterCommand("set","Set parameter:instance=value",config_set,"<param> <instance> <value>",3,3, true, config_validate);
+  cmd_config->RegisterCommand("rm","Remove parameter:instance",config_rm,"<param> {<instance> | *}",2,2, true, config_validate);
+
+#ifdef CONFIG_OVMS_SC_ZIP
+  cmd_config->RegisterCommand("backup", "Backup to file", config_backup,
+    "<zipfile> [password=module password]\n"
+    "Backup system configuration & scripts into password protected ZIP file.\n"
+    "Note: user files or directories in /store will not be included.\n"
+    "<password> defaults to the current module password, set to \"\" to disable encryption.\n"
+    "Hint: use 7z to unzip/create backup ZIPs on a PC.", 1, 2);
+  cmd_config->RegisterCommand("restore", "Restore from file", config_restore,
+    "<zipfile> [password=module password]\n"
+    "Restore system configuration & scripts from password protected ZIP file.\n"
+    "Note: user files or directories in /store will not be touched.\n"
+    "The module will perform a reboot after successful restore.\n"
+    "<password> defaults to the current module password.\n"
+    "Note: you need to supply the password used for the backup creation.", 1, 2);
+#endif // CONFIG_OVMS_SC_ZIP
 
   RegisterParam("password", "Password store", true, false);
   RegisterParam("module", "Module configuration", true, true);
@@ -187,7 +273,7 @@ esp_err_t OvmsConfig::mount()
   struct stat ds;
   if (stat(OVMS_CONFIGPATH, &ds) != 0)
     {
-    puts("Initialising OVMS CONFIG within STORE");
+    ESP_LOGI(TAG, "Initialising OVMS CONFIG within STORE");
     mkdir(OVMS_CONFIGPATH,0);
     }
 
@@ -245,6 +331,20 @@ void OvmsConfig::upgrade()
     SetParamValue("module", "init", "done");
     DeleteInstance("password", "changed");
     }
+
+  // Migrate vehicle.require.* signals to config:
+  if (GetParamValueInt("module", "cfgversion") < 2018112200)
+    {
+    std::string vt = GetParamValue("auto", "vehicle.type");
+    if (vt=="FT5E" || vt=="KS" || vt=="MI" || vt=="RT" || vt=="TGTC" || vt=="VA" || vt=="ZEVA")
+      {
+      SetParamValueBool("modem", "enable.gps", true);
+      SetParamValueBool("modem", "enable.gpstime", true);
+      }
+    }
+
+  // Done, set config version:
+  SetParamValueInt("module", "cfgversion", 2018112200);
   }
 
 void OvmsConfig::RegisterParam(std::string name, std::string title, bool writable, bool readable)
@@ -257,6 +357,7 @@ void OvmsConfig::RegisterParam(std::string name, std::string title, bool writabl
     }
   else
     {
+    k->second->SetTitle(title);
     k->second->SetAccess(writable, readable);
     }
   }
@@ -393,10 +494,7 @@ bool OvmsConfig::GetParamValueBool(std::string param, std::string instance, bool
   {
   std::string value = GetParamValue(param,instance);
   if (value.length() == 0) return defvalue;
-  if ((value == "yes")||(value == "1")||(value == "true"))
-    return true;
-  else
-    return false;
+  return strtobool(value);
   }
 
 bool OvmsConfig::IsDefined(std::string param, std::string instance)
@@ -410,11 +508,7 @@ OvmsConfigParam* OvmsConfig::CachedParam(std::string param)
   {
   if (!m_mounted) return NULL;
 
-  auto k = m_map.find(param);
-  if (k == m_map.end())
-    return NULL;
-  else
-    return k->second;
+  return m_map.FindUniquePrefix(param.c_str());
   }
 
 bool OvmsConfig::ProtectedPath(std::string path)
@@ -424,6 +518,246 @@ bool OvmsConfig::ProtectedPath(std::string path)
 #else
   return (path.find(OVMS_CONFIGPATH) != std::string::npos);
 #endif // #ifdef CONFIG_OVMS_DEV_CONFIGVFS
+  }
+
+/**
+ * GetParamMap: get map of param instances
+ * - Note: no modification allowed, to modify clone & call SetParamMap()
+ */
+const ConfigParamMap* OvmsConfig::GetParamMap(std::string param)
+  {
+  if (!CachedParam(param))
+    RegisterParam(param, "", true, false);
+  OvmsConfigParam* p = CachedParam(param);
+  if (p)
+    return &p->GetMap();
+  else
+    return NULL;
+  }
+
+/**
+ * SetParamMap: replace all param instances
+ * - Note: items will be removed from source map, map is empty afterwards
+ */
+void OvmsConfig::SetParamMap(std::string param, ConfigParamMap& map)
+  {
+  if (!CachedParam(param))
+    RegisterParam(param, "", true, false);
+  OvmsConfigParam* p = CachedParam(param);
+  if (p)
+    p->SetMap(map);
+  }
+
+#ifdef CONFIG_OVMS_SC_ZIP
+
+/**
+ * Backup:
+ */
+
+static struct
+  {
+  const char* name;
+  bool optional;
+  }
+  backup_dir[] =
+  {
+    { "ovms_config", false },
+    { "events", true },
+    { "scripts", true },
+    { "obd2ecu", true },
+    { "dbc", true },
+    { "plugin", true },
+    { NULL, false }
+  };
+
+bool OvmsConfig::Backup(std::string path, std::string password, OvmsWriter* writer /*=NULL*/, int verbosity /*=1024*/)
+  {
+  if (writer)
+    writer->printf("Creating config backup '%s'...\n", path.c_str());
+  else
+    ESP_LOGD(TAG, "Backup: creating '%s'...", path.c_str());
+
+  OvmsMutexLock store_lock(&m_store_lock);
+  bool ok = true;
+
+  ZipArchive zip(path, password, ZIP_CREATE|ZIP_TRUNCATE);
+  if (ok) ok = zip.chdir("/store");
+  for (int i = 0; ok && backup_dir[i].name; i++)
+    {
+    if (writer && verbosity >= COMMAND_RESULT_NORMAL)
+      writer->printf("..add '%s'\n", backup_dir[i].name);
+    else if (!writer)
+      ESP_LOGD(TAG, "Backup '%s': add '%s'", path.c_str(), backup_dir[i].name);
+    ok = zip.add(backup_dir[i].name, backup_dir[i].optional);
+    }
+  if (ok) ok = zip.close();
+
+  if (!ok)
+    {
+    if (writer)
+      writer->printf("Error: zip failed: %s\n", zip.strerror());
+    else
+      ESP_LOGE(TAG, "Backup '%s': zip failed: %s", path.c_str(), zip.strerror());
+    }
+  else
+    {
+    if (writer)
+      writer->puts("Done.");
+    else
+      ESP_LOGI(TAG, "Backup '%s' done", path.c_str());
+    }
+
+  return ok;
+  }
+
+/**
+ * Restore:
+ */
+
+static bool install_dir(std::string src, std::string dst)
+  {
+  if (!path_exists(src))
+    {
+    rmtree(dst);
+    return true;
+    }
+  std::string dstbak = dst + ".old";
+  rmtree(dstbak);
+  if (mkpath(dst) != 0) // ensure dst exists
+    return false;
+  if (rename(dst.c_str(), dstbak.c_str()) == 0)
+    {
+    if (rename(src.c_str(), dst.c_str()) == 0)
+      {
+      rmtree(dstbak);
+      return true;
+      }
+    rename(dstbak.c_str(), dst.c_str());
+    }
+  return false;
+  }
+
+bool OvmsConfig::Restore(std::string path, std::string password, OvmsWriter* writer /*=NULL*/, int verbosity /*=1024*/)
+  {
+  if (writer)
+    writer->printf("Restoring config from '%s'...\n", path.c_str());
+  else
+    ESP_LOGD(TAG, "Restore: reading '%s'...", path.c_str());
+
+  m_store_lock.Lock();
+  bool ok = true;
+
+  // unzip into restore directory:
+  // (Note: all paths beginning with "/store/ovms_config" are protected)
+  std::string tempdir = "/store/ovms_config_restore";
+
+  if (rmtree(tempdir) != 0 || mkpath(tempdir) != 0)
+    {
+    if (writer)
+      writer->printf("Error: prepare failed: %s\n", strerror(errno));
+    else
+      ESP_LOGE(TAG, "Restore '%s': prepare failed: %s", path.c_str(), strerror(errno));
+    m_store_lock.Unlock();
+    return false;
+    }
+
+  ZipArchive zip(path, password, ZIP_RDONLY);
+  if (ok) ok = zip.chdir(tempdir);
+  for (int i = 0; ok && backup_dir[i].name; i++)
+    {
+    if (writer && verbosity >= COMMAND_RESULT_NORMAL)
+      writer->printf("..extract '%s'\n", backup_dir[i].name);
+    else if (!writer)
+      ESP_LOGD(TAG, "Restore '%s': extract '%s'", path.c_str(), backup_dir[i].name);
+    ok = zip.extract(backup_dir[i].name, backup_dir[i].optional);
+    }
+  if (ok) ok = zip.close();
+
+  if (!ok)
+    {
+    if (writer)
+      writer->printf("Error: unzip failed: %s\n", zip.strerror());
+    else
+      ESP_LOGE(TAG, "Restore '%s': unzip failed: %s", path.c_str(), zip.strerror());
+    rmtree(tempdir);
+    m_store_lock.Unlock();
+    return false;
+    }
+
+  // replace config by restored version:
+
+  if (writer)
+    writer->puts("Installing...");
+  else
+    ESP_LOGD(TAG, "Restore '%s': installing...", path.c_str());
+
+  std::string dstbase = "/store/";
+  for (int i = 0; backup_dir[i].name; i++)
+    {
+    if (writer && verbosity >= COMMAND_RESULT_NORMAL)
+      writer->printf("..install '%s'\n", backup_dir[i].name);
+    else if (!writer)
+      ESP_LOGD(TAG, "Restore '%s':  install '%s'", path.c_str(), backup_dir[i].name);
+    if (!install_dir(tempdir + "/" + backup_dir[i].name, dstbase + backup_dir[i].name))
+      {
+      ok = false;
+      if (!backup_dir[i].optional)
+        {
+        if (writer)
+          writer->printf("Error: install '%s' failed: %s\n", backup_dir[i].name, strerror(errno));
+        else
+          ESP_LOGE(TAG, "Restore '%s': install '%s' failed: %s", path.c_str(), backup_dir[i].name, strerror(errno));
+        break;
+        }
+      else
+        {
+        if (writer)
+          writer->printf("Warning: install '%s' failed: %s\n", backup_dir[i].name, strerror(errno));
+        else
+          ESP_LOGW(TAG, "Restore '%s': install '%s' failed: %s", path.c_str(), backup_dir[i].name, strerror(errno));
+        }
+      }
+    }
+
+  // cleanup & reboot:
+
+  rmtree(tempdir);
+
+  if (!ok)
+    {
+    m_store_lock.Unlock();
+    return false;
+    }
+
+  if (writer)
+    writer->puts("Done, rebooting now...");
+  else
+    ESP_LOGI(TAG, "Restore '%s': done, rebooting...", path.c_str());
+
+  vTaskDelay(1000/portTICK_PERIOD_MS);
+  MyBoot.Restart();
+
+  return true;
+  }
+
+#endif // CONFIG_OVMS_SC_ZIP
+
+void OvmsConfig::SupportSummary(OvmsWriter* writer)
+  {
+  writer->puts("\nConfiguration");
+
+  for (ConfigMap::iterator mi=m_map.begin(); mi!=m_map.end(); ++mi)
+    {
+    writer->printf("  [%s]\n",mi->first.c_str());
+    OvmsConfigParam* p = mi->second;
+    for (ConfigParamMap::iterator it=p->m_map.begin(); it!=p->m_map.end(); ++it)
+      {
+      if (p->Readable())
+        { writer->printf("    %s: %s\n",it->first.c_str(), it->second.c_str()); }
+      else
+        { writer->printf("    %s: **redacted**\n",it->first.c_str()); }
+      }
+    }
   }
 
 OvmsConfigParam::OvmsConfigParam(std::string name, std::string title, bool writable, bool readable)
@@ -447,6 +781,8 @@ OvmsConfigParam::~OvmsConfigParam()
 void OvmsConfigParam::LoadConfig()
   {
   if (m_loaded) return;  // Protected against loading more than once
+
+  OvmsMutexLock store_lock(&MyConfig.m_store_lock);
 
   std::string path(OVMS_CONFIGPATH);
   path.append("/");
@@ -505,6 +841,8 @@ void OvmsConfigParam::SetValue(std::string instance, std::string value)
 
 void OvmsConfigParam::DeleteParam()
   {
+  OvmsMutexLock store_lock(&MyConfig.m_store_lock);
+
   std::string path(OVMS_CONFIGPATH);
   path.append("/");
   path.append(m_name);
@@ -569,11 +907,15 @@ std::string OvmsConfigParam::GetName()
 
 void OvmsConfigParam::RewriteConfig()
   {
+  OvmsMutexLock store_lock(&MyConfig.m_store_lock);
+
   std::string path(OVMS_CONFIGPATH);
   path.append("/");
   path.append(m_name);
   FILE* f = fopen(path.c_str(), "w");
-  if (f)
+  if (!f)
+    ESP_LOGE(TAG, "RewriteConfig: can't open '%s': %s", path.c_str(), strerror(errno));
+  else
     {
 #ifdef OVMS_PERSIST_METADATA
     // write meta data:
@@ -585,7 +927,8 @@ void OvmsConfigParam::RewriteConfig()
       {
       fprintf(f,"%s\t%s\n",it->first.c_str(),it->second.c_str());
       }
-    fclose(f);
+    if (fclose(f))
+      ESP_LOGE(TAG, "RewriteConfig: error writing '%s': %s", path.c_str(), strerror(errno));
     }
   }
 
@@ -601,4 +944,15 @@ void OvmsConfigParam::Save()
     RewriteConfig();
     MyEvents.SignalEvent("config.changed", this);
     }
+  }
+
+/**
+ * SetMap: replace all param instances
+ * - Note: items will be removed from source map, map is empty afterwards
+ */
+void OvmsConfigParam::SetMap(ConfigParamMap& map)
+  {
+  m_map.clear();
+  m_map = std::move(map);
+  Save();
   }

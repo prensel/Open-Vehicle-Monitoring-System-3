@@ -40,11 +40,12 @@ extern "C"
   {
 #include "netif/ppp/pppos.h"
 #include "netif/ppp/ppp.h"
-#include "lwip/pppapi.h"
+#include "netif/ppp/pppapi.h"
   };
 #include "gsmmux.h"
+#include "ovms.h"
 
-class GsmPPPOS
+class GsmPPPOS : public InternalRamAllocated
   {
   public:
     GsmPPPOS(GsmMux* mux, int channel);

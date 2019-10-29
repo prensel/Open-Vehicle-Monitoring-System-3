@@ -47,7 +47,7 @@ ConsoleAsync* ConsoleAsync::Instance()
   return m_instance;
   }
 
-ConsoleAsync::ConsoleAsync() : TaskBase("OVMS Console", 6*1024)
+ConsoleAsync::ConsoleAsync() : TaskBase("OVMS Console", CONFIG_OVMS_SYS_COMMAND_STACK_SIZE)
   {
   m_monitoring = true;
   uart_config_t uart_config =
@@ -64,7 +64,8 @@ ConsoleAsync::ConsoleAsync() : TaskBase("OVMS Console", 6*1024)
   uart_param_config(EX_UART_NUM, &uart_config);
 
   // Install UART driver, and get the queue.
-  uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 30, &m_queue, 0);
+  uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2,
+    CONFIG_OVMS_HW_ASYNC_QUEUE_SIZE, &m_queue, 0);
 
   Instantiate();
   }
@@ -168,6 +169,10 @@ void ConsoleAsync::HandleDeviceEvent(void* pEvent)
 	  }
         ProcessChars((char*)data, len);
         }
+      break;
+    case UART_BREAK:
+      // Ignore it
+      uart_flush(EX_UART_NUM);
       break;
     case UART_FIFO_OVF:
       ESP_LOGI(TAG, "hw fifo overflow\n");

@@ -13,8 +13,6 @@ Open Vehicle Monitor System v3 - Known issues
 
 * Vehicle: Kyburz not currently implemented in 3.x.
 
-* Vehicle: Mitdubishi iMiev not currently implemented in 3.x.
-
 * Vehicle: NissanLeaf:
   * Remote telemetry wake-up for pre-2016 vehicles not currently supported
     (as required hardware wakeup circuit).
@@ -24,7 +22,7 @@ Open Vehicle Monitor System v3 - Known issues
 
 * Vehicle: Think City not currently implemented in 3.x.
 
-* Vehicle: Volt/Ampera not currently implemented in 3.x.
+* Vehicle: Volt/Ampera only partially implemented in 3.x.
 
 * Vehicle: Renault Zoe not currently implemented in 3.x.
 
@@ -34,3 +32,6 @@ Open Vehicle Monitor System v3 - Known issues
 * SMS to command gateway is not currently implemented.
 
 * SMS notifications are not currently implemented.
+
+* Config partition corruptions with current esp-idf master
+  (tested: commit 020ade652d9b6b0b87b0bebe176a150cc4407749)

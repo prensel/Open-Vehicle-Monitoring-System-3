@@ -52,29 +52,29 @@ CANopen::CANopen()
 
   // register commands:
 
-  OvmsCommand* cmd_co = MyCommandApp.RegisterCommand("co", "CANopen framework", NULL, "", 0, 0, true);
-  cmd_co->RegisterCommand("status", "Show CANopen status", shell_status, "", 0, 0, true);
+  OvmsCommand* cmd_co = MyCommandApp.RegisterCommand("copen", "CANopen framework");
+  cmd_co->RegisterCommand("status", "Show CANopen status", shell_status);
 
   for (int k=1; k <= CAN_INTERFACE_CNT; k++)
     {
     static const char* name[4] = {"can1", "can2", "can3"};
-    OvmsCommand* cmd_canx = cmd_co->RegisterCommand(name[k-1], "select bus", NULL, "", 0, 0, true);
+    OvmsCommand* cmd_canx = cmd_co->RegisterCommand(name[k-1], "select bus");
 
-    cmd_canx->RegisterCommand("start", "Start CANopen worker", shell_start, "", 0, 0, true);
-    cmd_canx->RegisterCommand("stop", "Stop CANopen worker", shell_stop, "", 0, 0, true);
+    cmd_canx->RegisterCommand("start", "Start CANopen worker", shell_start);
+    cmd_canx->RegisterCommand("stop", "Stop CANopen worker", shell_stop);
 
-    OvmsCommand* cmd_nmt = cmd_canx->RegisterCommand("nmt", "Send NMT request", NULL, "", 0, 0, true);
-    cmd_nmt->RegisterCommand("start", "Start node", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2, true);
-    cmd_nmt->RegisterCommand("stop", "Stop node", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2, true);
-    cmd_nmt->RegisterCommand("preop", "Enter pre-operational state", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2, true);
-    cmd_nmt->RegisterCommand("reset", "Reset node", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2, true);
-    cmd_nmt->RegisterCommand("commreset", "Reset communication layer", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2, true);
+    OvmsCommand* cmd_nmt = cmd_canx->RegisterCommand("nmt", "Send NMT request");
+    cmd_nmt->RegisterCommand("start", "Start node", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2);
+    cmd_nmt->RegisterCommand("stop", "Stop node", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2);
+    cmd_nmt->RegisterCommand("preop", "Enter pre-operational state", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2);
+    cmd_nmt->RegisterCommand("reset", "Reset node", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2);
+    cmd_nmt->RegisterCommand("commreset", "Reset communication layer", shell_nmt, "[nodeid=0] [timeout_ms=0]", 0, 2);
 
-    cmd_canx->RegisterCommand("readsdo", "Read SDO register", shell_readsdo, "<nodeid> <index_hex> <subindex_hex> [timeout_ms=50]", 3, 4, true);
-    cmd_canx->RegisterCommand("writesdo", "Write SDO register", shell_writesdo, "<nodeid> <index_hex> <subindex_hex> <value> [timeout_ms=50]", 4, 5, true);
+    cmd_canx->RegisterCommand("readsdo", "Read SDO register", shell_readsdo, "<nodeid> <index_hex> <subindex_hex> [timeout_ms=50]", 3, 4);
+    cmd_canx->RegisterCommand("writesdo", "Write SDO register", shell_writesdo, "<nodeid> <index_hex> <subindex_hex> <value> [timeout_ms=50]", 4, 5);
 
-    cmd_canx->RegisterCommand("info", "Show node info", shell_info, "<nodeid> [timeout_ms=50]", 1, 2, true);
-    cmd_canx->RegisterCommand("scan", "Scan nodes", shell_scan, "[[startid=1][-][endid=127]] [timeout_ms=50]", 0, 2, true);
+    cmd_canx->RegisterCommand("info", "Show node info", shell_info, "<nodeid> [timeout_ms=50]", 1, 2);
+    cmd_canx->RegisterCommand("scan", "Scan nodes", shell_scan, "[[startid=1][-][endid=127]] [timeout_ms=50]", 0, 2);
     }
   }
 
@@ -141,7 +141,7 @@ CANopenWorker* CANopen::Start(canbus* bus)
     {
     m_rxqueue = xQueueCreate(20, sizeof(CAN_frame_t));
     xTaskCreatePinnedToCore(CANopenRxTask, "OVMS COrx",
-      CONFIG_OVMS_COMP_CANOPEN_RX_STACK, (void*)this, 7, &m_rxtask, 0);
+      CONFIG_OVMS_COMP_CANOPEN_RX_STACK, (void*)this, 7, &m_rxtask, CORE(0));
     MyCan.RegisterListener(m_rxqueue);
     }
 

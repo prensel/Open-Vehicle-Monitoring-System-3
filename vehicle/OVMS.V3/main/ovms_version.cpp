@@ -31,8 +31,9 @@
 #include "ovms_log.h"
 static const char *TAG = "version";
 
-#include <esp_system.h>
+#include <esp_image_format.h>
 #include <esp_ota_ops.h>
+#include <esp_system.h>
 #include "ovms.h"
 #include "ovms_version.h"
 #include "ovms_config.h"
@@ -40,8 +41,83 @@ static const char *TAG = "version";
 #include "metrics_standard.h"
 #include "ovms_events.h"
 
-#define OVMS_VERSION_PREFIX "########OVMS_PRE########"
-#define OVMS_VERSION_POSTFIX "########OVMSPOST########"
+
+std::string GetOVMSPartitionVersion(esp_partition_subtype_t t)
+  {
+  int i, len;
+  size_t offset;
+  size_t n, size;
+  char *cp, *cp2, *buf2;
+  std::string version;
+  const esp_partition_t *p;
+  esp_image_header_t *pfhdr;
+  esp_image_segment_header_t *header;
+  char buf[512 + 1];
+  const char prefix[] = OVMS_VERSION_PREFIX;
+  const char postfix[] = OVMS_VERSION_POSTFIX;
+
+  /* Find the partition detail */
+  p = esp_partition_find_first(ESP_PARTITION_TYPE_APP, t, NULL);
+  if (p == NULL)
+      return "";
+
+  /* Read image header */
+  pfhdr = (esp_image_header_t *)buf;
+  offset = 0;
+  if (esp_partition_read(p, offset, pfhdr, sizeof(*pfhdr)) != ESP_OK)
+      return "";
+  if (pfhdr->magic != ESP_IMAGE_HEADER_MAGIC)
+      return "";
+  if (pfhdr->segment_count > ESP_IMAGE_MAX_SEGMENTS)
+      return "";
+
+  /* Read the first segment header */
+  header = (esp_image_segment_header_t *)buf;
+  offset += sizeof(*pfhdr);
+  if (esp_partition_read(p, offset, header, sizeof(*header)) != ESP_OK)
+      return "";
+
+  /* Search for the version string */
+  offset += sizeof(*header);
+  len = header->data_len;
+  size = sizeof(buf) - 1;
+  buf2 = buf;
+  while (len > 0) {
+    n = size;
+    if (n > len)
+      n = len;
+    if (esp_partition_read(p, offset, buf2, n) != ESP_OK)
+      return "";
+    offset += n;
+
+    /* Insure EOS */
+    buf2[n] = '\0';
+    len -= n;
+
+    n = sizeof(buf) - (sizeof(prefix) + sizeof(postfix) - 2);
+    for (i = 0, cp = buf; i < n; ++i, ++cp) {
+      if (*cp != prefix[0])
+        continue;
+      if (strncmp(cp, prefix, sizeof(prefix) - 1) != 0)
+	continue;
+      cp2 = strstr(cp, postfix);
+      if (cp2 == NULL)
+	continue;
+      *cp2 = '\0';
+      cp += sizeof(prefix) - 1;
+      *cp2 = '\0';
+      version.assign(cp);
+      return version;
+    }
+
+    /* Shift the buffer left to avoid splitting the string */
+    n = (sizeof(buf) - 1) / 2;
+    buf2 = buf + n;
+    memcpy(buf, buf2, n);
+    size = n;
+  }
+  return "";
+  }
 
 std::string GetOVMSVersion()
   {
@@ -94,8 +170,8 @@ std::string GetOVMSHardware()
 
 void Version(std::string event, void* data)
   {
-  char buf[20];
-  uint8_t mac[6];
+//  char buf[20];
+//  uint8_t mac[6];
 
   std::string metric = GetOVMSVersion();
   metric.append(" (build ");
@@ -106,10 +182,10 @@ void Version(std::string event, void* data)
   metric = GetOVMSHardware();
   StandardMetrics.ms_m_hardware->SetValue(metric.c_str());
 
-  esp_efuse_mac_get_default(mac);
-  sprintf(buf,"%02x:%02x:%02x:%02x:%02x:%02x",
-          mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
-  StandardMetrics.ms_m_serial->SetValue(buf);
+//  esp_efuse_mac_get_default(mac);
+//  sprintf(buf,"%02x:%02x:%02x:%02x:%02x:%02x",
+//          mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+//  StandardMetrics.ms_m_serial->SetValue(buf);
   }
 
 class VersionInit

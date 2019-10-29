@@ -39,7 +39,7 @@
 #ifndef __SPI_H__
 #define __SPI_H__
 
-class spi : public pcp
+class spi : public pcp, public InternalRamAllocated
   {
   public:
     spi(const char* name, int misopin, int mosipin, int clkpin);
@@ -49,6 +49,7 @@ class spi : public pcp
     bool LockBus(TickType_t delay = portMAX_DELAY);
     void UnlockBus();
     uint8_t* spi_cmd(spi_nodma_device_handle_t spi, uint8_t* buf, int rxlen, int txlen, ...);
+    esp_err_t spi_deselect(spi_nodma_device_handle_t spi);
 
   public:
     spi_nodma_bus_config_t m_buscfg;

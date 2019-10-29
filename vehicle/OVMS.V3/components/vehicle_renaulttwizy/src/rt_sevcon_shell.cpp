@@ -33,6 +33,7 @@
 
 #include "crypt_base64.h"
 #include "ovms_notify.h"
+#include "string_writer.h"
 
 #include "vehicle_renaulttwizy.h"
 #include "rt_sevcon.h"
@@ -224,7 +225,7 @@ void SevconClient::shell_cfg_write(int verbosity, OvmsWriter* writer, OvmsComman
 
 
 // Shell command: xrt cfg …
-//    set <key> <base64data>
+//    set <key> <base64data> [<label>] [<title>]
 //    reset [key]
 // 
 //   key 0 → update working set & try to apply
@@ -275,27 +276,37 @@ void SevconClient::shell_cfg_set(int verbosity, OvmsWriter* writer, OvmsCommand*
     writer->printf("OK, profile #%d has been %s\n", key, cmd->GetName());
     
     // signal "unsaved" if WS now differs from stored profile:
-    if (key == me->m_drivemode.profile_user)
+    if (key == me->m_drivemode.profile_ws)
       me->m_drivemode.unsaved = 1;
+
+    // optionally set/clear label and title:
+    StringWriter profile;
+    profile.printf("profile%02d", key);
+    if (strcmp(cmd->GetName(), "reset") == 0) {
+      MyConfig.SetParamValue("xrt", profile + ".label", "");
+      MyConfig.SetParamValue("xrt", profile + ".title", "");
+    } else {
+      if (argc > 2)
+        MyConfig.SetParamValue("xrt", profile + ".label", argv[2]);
+      if (argc > 3)
+        MyConfig.SetParamValue("xrt", profile + ".title", argv[3]);
+    }
   }
   else {
-    if (memcmp(&me->m_profile, &profile, sizeof(profile)) != 0) {
-      
-      // update working set:
-      me->m_profile = profile;
-      
-      // signal "unsaved" if custom profile active:
-      me->m_drivemode.unsaved = (me->m_drivemode.profile_user > 0);
-      
-      // try to apply profile:
 
-      CANopenResult_t res = me->CheckBus();
-      if (res != COR_OK) {
-        writer->printf("Profile updated, SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-        return;
-      }
-      
-      res = me->CfgApplyProfile(me->m_drivemode.profile_user);
+    // update working set:
+    me->m_profile = profile;
+    
+    // signal "unsaved" if custom profile active:
+    me->m_drivemode.unsaved = (me->m_drivemode.profile_ws > 0);
+    
+    // try to apply profile:
+    me->m_drivemode.applied = 0;
+    CANopenResult_t res = me->CheckBus();
+    if (res != COR_OK) {
+      writer->printf("Profile updated, SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
+    } else {
+      res = me->CfgApplyProfile(me->m_drivemode.profile_ws);
       if (res == COR_OK)
         writer->puts("OK, live & base tuning changed");
       else if (res == COR_ERR_StateChangeFailed)
@@ -304,6 +315,8 @@ void SevconClient::shell_cfg_set(int verbosity, OvmsWriter* writer, OvmsCommand*
         writer->printf("ERROR: %s\n", me->GetResultString(res));
     }
   }
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -451,7 +464,10 @@ void SevconClient::shell_cfg_info(int verbosity, OvmsWriter* writer, OvmsCommand
   }
   else {
     // working set:
-    verbosity -= writer->printf("WS:\n");
+    verbosity -= writer->printf("WS [loaded #%d%s%s]:\n",
+                                me->m_drivemode.profile_ws,
+                                me->m_drivemode.unsaved ? ", unsaved" : "",
+                                !me->m_drivemode.applied ? ", unapplied" : "");
     PrintProfile(verbosity, writer, me->m_profile);
   }
 }
@@ -472,7 +488,7 @@ void SevconClient::shell_cfg_save(int verbosity, OvmsWriter* writer, OvmsCommand
   
   // parse args:
   
-  int key = me->m_drivemode.profile_user;
+  int key = me->m_drivemode.profile_ws;
   if (argc >= 1) {
     key = strtol(argv[0], NULL, 10);
   }
@@ -493,13 +509,18 @@ void SevconClient::shell_cfg_save(int verbosity, OvmsWriter* writer, OvmsCommand
     me->m_drivemode.unsaved = 0;
 
     // make destination new current:
-    if (me->m_drivemode.profile_cfgmode == me->m_drivemode.profile_user) {
+    if (me->m_drivemode.profile_cfgmode == me->m_drivemode.profile_ws) {
       me->m_drivemode.profile_cfgmode = key;
       MyConfig.SetParamValueInt("xrt", "profile_cfgmode", me->m_drivemode.profile_cfgmode);
     }
-    me->m_drivemode.profile_user = key;
-    MyConfig.SetParamValueInt("xrt", "profile_user", me->m_drivemode.profile_user);
+    if (me->m_drivemode.profile_user == me->m_drivemode.profile_ws) {
+      me->m_drivemode.profile_user = key;
+      MyConfig.SetParamValueInt("xrt", "profile_user", me->m_drivemode.profile_user);
+    }
+    me->m_drivemode.profile_ws = key;
   }
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -516,7 +537,7 @@ void SevconClient::shell_cfg_load(int verbosity, OvmsWriter* writer, OvmsCommand
   
   // parse args:
   
-  int key = me->m_drivemode.profile_user;
+  int key = me->m_drivemode.profile_ws;
   if (argc >= 1) {
     key = strtol(argv[0], NULL, 10);
   }
@@ -529,6 +550,8 @@ void SevconClient::shell_cfg_load(int verbosity, OvmsWriter* writer, OvmsCommand
   
   CANopenResult_t res = me->CfgSwitchProfile(key);
   writer->printf("CFG LOAD #%d: %s\n", key, me->FmtSwitchProfileResult(res).c_str());
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -578,18 +601,21 @@ void SevconClient::shell_cfg_drive(int verbosity, OvmsWriter* writer, OvmsComman
   twizy->twizy_kickdown_level = 0;
   
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   CANopenResult_t res = me->CheckBus();
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgDrive(max_prc, autopower_ref, autopower_minprc);
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed");
+      me->m_drivemode.applied = 1;
+    }
   }
-  
-  res = me->CfgDrive(max_prc, autopower_ref, autopower_minprc);
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed");
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -633,18 +659,21 @@ void SevconClient::shell_cfg_recup(int verbosity, OvmsWriter* writer, OvmsComman
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   CANopenResult_t res = me->CheckBus();
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgRecup(neutral_prc, brake_prc, autopower_ref, autopower_minprc);
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed");
+      me->m_drivemode.applied = 1;
+    }
   }
-  
-  res = me->CfgRecup(neutral_prc, brake_prc, autopower_ref, autopower_minprc);
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed");
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -686,22 +715,24 @@ void SevconClient::shell_cfg_ramps(int verbosity, OvmsWriter* writer, OvmsComman
   me->m_profile.ramp_decel = cfgvalue(decel_prc);
   me->m_profile.ramp_neutral = cfgvalue(neutral_prc);
   me->m_profile.ramp_brake = cfgvalue(brake_prc);
-
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   CANopenResult_t res = me->CheckBus();
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgRamps(start_prc, accel_prc, decel_prc, neutral_prc, brake_prc);
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed");
+      me->m_drivemode.applied = 1;
+    }
   }
-  
-  res = me->CfgRamps(start_prc, accel_prc, decel_prc, neutral_prc, brake_prc);
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed");
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -731,22 +762,24 @@ void SevconClient::shell_cfg_ramplimits(int verbosity, OvmsWriter* writer, OvmsC
   // update profile:
   me->m_profile.ramplimit_accel = cfgvalue(accel_prc);
   me->m_profile.ramplimit_decel = cfgvalue(decel_prc);
-
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   CANopenResult_t res = me->CheckBus();
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgRampLimits(accel_prc, decel_prc);
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed");
+      me->m_drivemode.applied = 1;
+    }
   }
-  
-  res = me->CfgRampLimits(accel_prc, decel_prc);
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed");
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -772,22 +805,24 @@ void SevconClient::shell_cfg_smooth(int verbosity, OvmsWriter* writer, OvmsComma
   
   // update profile:
   me->m_profile.smooth = cfgvalue(prc);
-
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   CANopenResult_t res = me->CheckBus();
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgSmoothing(prc);
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed");
+      me->m_drivemode.applied = 1;
+    }
   }
-  
-  res = me->CfgSmoothing(prc);
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed");
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -817,28 +852,28 @@ void SevconClient::shell_cfg_speed(int verbosity, OvmsWriter* writer, OvmsComman
   // update profile:
   me->m_profile.speed = cfgvalue(max_kph);
   me->m_profile.warn = cfgvalue(warn_kph);
-
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   SevconJob sc(me);
   CANopenResult_t res = sc.CfgMode(true);
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgSpeed(max_kph, warn_kph);
+    if (res == COR_OK)
+      res = me->CfgMakePowermap();
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
+      me->m_drivemode.applied = 1;
+    }
+    sc.CfgMode(false);
   }
-  
-  res = me->CfgSpeed(max_kph, warn_kph);
-  if (res == COR_OK)
-    res = me->CfgMakePowermap();
-  
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
-  
-  sc.CfgMode(false);
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -883,28 +918,28 @@ void SevconClient::shell_cfg_power(int verbosity, OvmsWriter* writer, OvmsComman
   me->m_profile.power_low = cfgvalue(pwr_lo_prc);
   me->m_profile.power_high = cfgvalue(pwr_hi_prc);
   me->m_profile.current = cfgvalue(curr_prc);
-
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   SevconJob sc(me);
   CANopenResult_t res = sc.CfgMode(true);
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgPower(trq_prc, pwr_lo_prc, pwr_hi_prc, curr_prc);
+    if (res == COR_OK)
+      res = me->CfgMakePowermap();
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
+      me->m_drivemode.applied = 1;
+    }
+    sc.CfgMode(false);
   }
-  
-  res = me->CfgPower(trq_prc, pwr_lo_prc, pwr_hi_prc, curr_prc);
-  if (res == COR_OK)
-    res = me->CfgMakePowermap();
-  
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
-  
-  sc.CfgMode(false);
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -935,9 +970,9 @@ void SevconClient::shell_cfg_tsmap(int verbosity, OvmsWriter* writer, OvmsComman
   }
   
   for (i=1; i<=4 && i<argc; i++) {
-    prc[i] = strtol(argv[i], &s, 10);
+    prc[i-1] = strtol(argv[i], &s, 10);
     if (*s == '@')
-      spd[i] = strtol(s+1, NULL, 10);
+      spd[i-1] = strtol(s+1, NULL, 10);
   }
   
   // execute:
@@ -954,31 +989,31 @@ void SevconClient::shell_cfg_tsmap(int verbosity, OvmsWriter* writer, OvmsComman
     me->m_profile.tsmap[m].spd3 = cfgvalue(spd[2]);
     me->m_profile.tsmap[m].spd4 = cfgvalue(spd[3]);
   }
-  
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   SevconJob sc(me);
   CANopenResult_t res = sc.CfgMode(true);
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    for (i=0; maps[i]; i++) {
+      if ((res = me->CfgTSMap(maps[i],
+                      prc[0], prc[1], prc[2], prc[3],
+                      spd[0], spd[1], spd[2], spd[3])) != COR_OK)
+        break;
+    }
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
+      me->m_drivemode.applied = 1;
+    }
+    sc.CfgMode(false);
   }
-  
-  for (i=0; maps[i]; i++) {
-    if ((res = me->CfgTSMap(maps[i],
-                    prc[0], prc[1], prc[2], prc[3],
-                    spd[0], spd[1], spd[2], spd[3])) != COR_OK)
-      break;
-  }
-  
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
-  
-  sc.CfgMode(false);
+
+  me->UpdateProfileMetrics();
 }
 
 
@@ -1011,25 +1046,26 @@ void SevconClient::shell_cfg_brakelight(int verbosity, OvmsWriter* writer, OvmsC
   // update profile:
   me->m_profile.brakelight_on = cfgvalue(on_lev);
   me->m_profile.brakelight_off = cfgvalue(off_lev);
-
   me->m_drivemode.unsaved = 1;
 
   // try to apply:
-  
+  me->m_drivemode.applied = 0;
   SevconJob sc(me);
   CANopenResult_t res = sc.CfgMode(true);
   if (res != COR_OK) {
     writer->printf("Profile updated (unsaved), SEVCON unchanged: %s\n", me->GetResultString(res).c_str());
-    return;
+  } else {
+    res = me->CfgBrakelight(on_lev, off_lev);
+    if (res != COR_OK)
+      writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
+    else {
+      writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
+      me->m_drivemode.applied = 1;
+    }
+    sc.CfgMode(false);
   }
-  
-  res = me->CfgBrakelight(on_lev, off_lev);
-  if (res != COR_OK)
-    writer->printf("Profile updated (unsaved), SEVCON ERROR: %s\n", me->GetResultString(res).c_str());
-  else
-    writer->puts("OK, profile & tuning changed, restart Twizy to activate!");
-  
-  sc.CfgMode(false);
+
+  me->UpdateProfileMetrics();
 }
 
 

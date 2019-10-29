@@ -37,6 +37,7 @@ static const char *TAG = "simcom";
 #include "metrics_standard.h"
 #include "ovms_config.h"
 #include "ovms_events.h"
+#include "ovms_notify.h"
 #include "ovms_boot.h"
 
 const char* SimcomState1Name(simcom::SimcomState1 state)
@@ -46,7 +47,7 @@ const char* SimcomState1Name(simcom::SimcomState1 state)
     case simcom::None:           return "None";
     case simcom::CheckPowerOff:  return "CheckPowerOff";
     case simcom::PoweringOn:     return "PoweringOn";
-    case simcom::PoweredOn:      return "PoweredOff";
+    case simcom::PoweredOn:      return "PoweredOn";
     case simcom::MuxStart:       return "MuxStart";
     case simcom::NetWait:        return "NetWait";
     case simcom::NetStart:       return "NetStart";
@@ -84,6 +85,7 @@ static void SIMCOM_task(void *pvParameters)
 void simcom::Task()
   {
   SimcomOrUartEvent event;
+  uint8_t data[128];
 
   for(;;)
     {
@@ -99,11 +101,10 @@ void simcom::Task()
             size_t buffered_size = event.uart.size;
             while (buffered_size > 0)
               {
-              uint8_t data[16];
-              if (buffered_size>16) buffered_size = 16;
+              if (buffered_size>sizeof(data)) buffered_size = sizeof(data);
               int len = uart_read_bytes(m_uartnum, (uint8_t*)data, buffered_size, 100 / portTICK_RATE_MS);
               m_buffer.Push(data,len);
-              MyCommandApp.HexDump(TAG, "rx", (const char*)data, len);
+              //MyCommandApp.HexDump(TAG, "rx", (const char*)data, len);
               uart_get_buffered_data_len(m_uartnum, &buffered_size);
               SimcomState1 newstate = State1Activity();
               if ((newstate != m_state1)&&(newstate != None)) SetState1(newstate);
@@ -112,15 +113,28 @@ void simcom::Task()
             break;
           case UART_FIFO_OVF:
             uart_flush(m_uartnum);
+            m_err_fifo_ovf++;
+            ESP_LOGW(TAG, "UART hw fifo overflow");
             break;
           case UART_BUFFER_FULL:
             uart_flush(m_uartnum);
+            m_err_buffer_full++;
+            ESP_LOGW(TAG, "UART ring buffer full");
             break;
           case UART_BREAK:
+            ESP_LOGD(TAG, "UART rx break");
+            break;
           case UART_PARITY_ERR:
+            ESP_LOGW(TAG, "UART parity check error");
+            break;
           case UART_FRAME_ERR:
+            ESP_LOGW(TAG, "UART frame error");
+            break;
           case UART_PATTERN_DET:
+            ESP_LOGD(TAG, "UART pattern detected");
+            break;
           default:
+            ESP_LOGD(TAG, "UART unknown event type: %d", event.uart.type);
             break;
           }
         }
@@ -159,18 +173,17 @@ simcom::simcom(const char* name, uart_port_t uartnum, int baud, int rxpin, int t
   m_provider = "";
   m_sq = 99; // = unknown
   m_powermode = Off;
-  m_gps_required = false;
   m_line_unfinished = -1;
   m_line_buffer.clear();
+  m_pincode_required = false;
+  m_err_fifo_ovf = 0;
+  m_err_buffer_full = 0;
+
   StartTask();
 
   using std::placeholders::_1;
   using std::placeholders::_2;
   MyEvents.RegisterEvent(TAG,"ticker.1", std::bind(&simcom::Ticker, this, _1, _2));
-  MyEvents.RegisterEvent(TAG, "vehicle.require.gps", std::bind(&simcom::EventListener, this, _1, _2));
-  MyEvents.RegisterEvent(TAG, "vehicle.release.gps", std::bind(&simcom::EventListener, this, _1, _2));
-  MyEvents.RegisterEvent(TAG, "vehicle.require.gpstime", std::bind(&simcom::EventListener, this, _1, _2));
-  MyEvents.RegisterEvent(TAG, "vehicle.release.gpstime", std::bind(&simcom::EventListener, this, _1, _2));
   MyEvents.RegisterEvent(TAG, "system.shuttingdown", std::bind(&simcom::EventListener, this, _1, _2));
   }
 
@@ -183,6 +196,88 @@ void simcom::AutoInit()
   {
   if (MyConfig.GetParamValueBool("auto", "modem", false))
     SetPowerMode(On);
+  }
+
+void simcom::Restart()
+  {
+  ESP_LOGI(TAG, "Restart");
+  if (MyConfig.GetParamValueBool("auto", "modem", false))
+    SetState1((m_state1 != PoweredOff) ? PowerOffOn : PoweringOn);
+  else
+    SetState1(PoweringOff);
+  }
+
+void simcom::SupportSummary(OvmsWriter* writer)
+  {
+  writer->puts("\nSIMCOM Modem Status");
+
+  if (m_pincode_required)
+    {
+    writer->printf("SIM card PIN code required.\n");
+    if (MyConfig.GetParamValueBool("modem","wrongpincode"))
+      writer->printf("Wrong PIN (%s) entered!\n", MyConfig.GetParamValue("modem","pincode").c_str());
+    }
+  writer->printf("  Network Registration: %s\n  Provider: %s\n  Signal: %d dBm\n  State: %s\n",
+    SimcomNetRegName(m_netreg),
+    m_provider.c_str(),
+    UnitConvert(sq, dbm, m_sq),
+    SimcomState1Name(m_state1));
+
+  writer->printf("    Ticker: %d\n    User Data: %d\n",
+    m_state1_ticker,
+    m_state1_userdata);
+  writer->printf(
+    "    HW FIFO overflows: %d\n"
+    "    Buffer overflows: %d\n"
+    , m_err_fifo_ovf
+    , m_err_buffer_full);
+
+  if (m_state1_timeout_goto != None)
+    {
+    writer->printf("    State Timeout Goto: %s (in %d seconds)\n",
+      SimcomState1Name(m_state1_timeout_goto),
+      m_state1_timeout_ticks);
+    }
+
+  writer->printf("  Mux\n    Status: %s\n", m_mux.IsMuxUp()?"up":"down");
+
+  writer->printf("    Open Channels: %d\n", m_mux.m_openchannels);
+
+  writer->printf("    Framing Errors: %d\n", m_mux.m_framingerrors);
+
+  writer->printf("    Last RX frame: %d sec(s) ago\n",
+    (m_mux.m_lastgoodrxframe==0)?0:(monotonictime-m_mux.m_lastgoodrxframe));
+
+  writer->printf("    RX frames: %d\n", m_mux.m_rxframecount);
+
+  writer->printf("    TX frames: %d\n", m_mux.m_txframecount);
+
+  if (m_ppp.m_connected)
+    {
+    writer->printf("  PPP: Connected on channel: #%d\n", m_ppp.m_channel);
+    }
+  else
+    {
+    writer->puts("  PPP: Not connected");
+    }
+  if (m_ppp.m_lasterrcode > 0)
+    {
+    writer->printf("     Last Error: %s\n", m_ppp.ErrCodeName(m_ppp.m_lasterrcode));
+    }
+
+  if (m_nmea.m_connected)
+    {
+    writer->printf("  GPS: Connected on channel: #%d\n", m_nmea.m_channel);
+    }
+  else
+    {
+    writer->puts("  GPS: Not connected");
+    }
+
+  writer->printf("     Status: %s\n",
+    MyConfig.GetParamValueBool("modem", "enable.gps", false) ? "enabled" : "disabled");
+  writer->printf("     Time: %s\n",
+    MyConfig.GetParamValueBool("modem", "enable.gpstime", false) ? "enabled" : "disabled");
   }
 
 void simcom::StartTask()
@@ -202,13 +297,13 @@ void simcom::StartTask()
     // Set UART parameters
     uart_param_config(m_uartnum, &uart_config);
 
-    // Install UART driver, and get the queue.
-    uart_driver_install(m_uartnum, SIMCOM_BUF_SIZE * 2, SIMCOM_BUF_SIZE * 2, 10, &m_queue, 0);
-
     // Set UART pins
     uart_set_pin(m_uartnum, m_txpin, m_rxpin, 0, 0);
 
-    xTaskCreatePinnedToCore(SIMCOM_task, "OVMS SIMCOM", 4096, (void*)this, 5, &m_task, 1);
+    // Install UART driver, and get the queue.
+    uart_driver_install(m_uartnum, SIMCOM_BUF_SIZE * 2, SIMCOM_BUF_SIZE * 2, 50, &m_queue, ESP_INTR_FLAG_LEVEL3);
+
+    xTaskCreatePinnedToCore(SIMCOM_task, "OVMS SIMCOM", 4096, (void*)this, 20, &m_task, CORE(1));
     }
   }
 
@@ -237,6 +332,8 @@ bool simcom::IsStarted()
 
 void simcom::UpdateNetMetrics()
   {
+  StdMetrics.ms_m_net_mdm_network->SetValue(m_provider);
+  StdMetrics.ms_m_net_mdm_sq->SetValue(m_sq, sq);
   if (StdMetrics.ms_m_net_type->AsString() == "modem")
     {
     StdMetrics.ms_m_net_provider->SetValue(m_provider);
@@ -285,39 +382,7 @@ void simcom::Ticker(std::string event, void* data)
 
 void simcom::EventListener(std::string event, void* data)
   {
-  if (event == "vehicle.require.gps")
-    {
-    m_gps_required = true;
-    if (!m_nmea.m_connected)
-      {
-      // power on if necessary:
-      SetPowerMode(On);
-      // if powering on now, GPS will be started automatically, else:
-      if (m_state1 != PoweringOn)
-        m_nmea.Startup(m_gps_required);
-      }
-    }
-  else if (event == "vehicle.release.gps")
-    {
-    m_gps_required = false;
-    if (m_nmea.m_connected && !MyConfig.GetParamValueBool("modem", "enable.gps", false))
-      {
-      // if we were powered on just for GPS, power off:
-      if (m_state1 == NetHold)
-        SetState1(PoweringOff);
-      else
-        m_nmea.Shutdown();
-      }
-    }
-  else if (event == "vehicle.require.gpstime")
-    {
-    m_nmea.m_gpstime_required = true;
-    }
-  else if (event == "vehicle.release.gpstime")
-    {
-    m_nmea.m_gpstime_required = false;
-    }
-  else if (event == "system.shuttingdown")
+  if (event == "system.shuttingdown")
     {
     if (m_state1 != PoweredOff)
       {
@@ -449,7 +514,7 @@ void simcom::State1Enter(SimcomState1 newstate)
     case NetWait:
       ESP_LOGI(TAG,"State: Enter NetWait state");
       MyEvents.SignalEvent("system.modem.netwait", NULL);
-      m_nmea.Startup(m_gps_required);
+      m_nmea.Startup();
       break;
     case NetStart:
       ESP_LOGI(TAG,"State: Enter NetStart state");
@@ -867,6 +932,42 @@ void simcom::StandardLineHandler(int channel, OvmsBuffer* buf, std::string line)
       ESP_LOGI(TAG,"SMS length is %d",(int)buf->m_userdata);
       }
     }
+  // SIM card PIN code required:
+  else if (line.compare(0, 14, "+CPIN: SIM PIN") == 0)
+    {
+    ESP_LOGI(TAG,"SIM card PIN code required");
+    m_pincode_required=true;
+    std::string pincode = MyConfig.GetParamValue("modem", "pincode");
+    if (!MyConfig.GetParamValueBool("modem","wrongpincode"))
+      {
+      if (pincode != "")
+        {
+        ESP_LOGI(TAG,"Using PIN code \"%s\"",pincode.c_str());
+        std::string at = "AT+CPIN=\"";
+        at.append(pincode);
+        at.append("\"\r\n");
+        tx(at.c_str());
+        }
+      else
+        {
+        ESP_LOGE(TAG,"SIM card PIN code not set!");
+        MyEvents.SignalEvent("system.modem.pincode_not_set", NULL);
+        MyNotify.NotifyString("alert", "modem.no_pincode", "No PIN code for SIM card configured!");
+        }
+      } else
+      {
+      ESP_LOGW(TAG,"Wrong PIN code (%s) previously entered.. Will not re-enter until changed!", pincode.c_str());
+      MyNotify.NotifyStringf("alert", "modem.wrongpincode", "Wrong pin code (%s) previously entered! Did not re-enter it..",pincode.c_str());
+      }
+    }
+  else if (line.compare(0, 30, "+CME ERROR: incorrect password") == 0)
+    {
+    ESP_LOGE(TAG,"Wrong PIN code entered!");
+    MyEvents.SignalEvent("system.modem.wrongpingcode", NULL);
+    MyNotify.NotifyStringf("alert", "modem.wrongpincode", "Wrong pin code (%s) entered!", MyConfig.GetParamValue("modem", "pincode"));
+    MyConfig.SetParamValueBool("modem","wrongpincode",true);
+    }
+
   // MMI/USSD response (URC):
   //  sent on all free channels, so we only process GSM_MUX_CHAN_CMD
   else if (channel == GSM_MUX_CHAN_CMD && line.compare(0, 7, "+CUSD: ") == 0)
@@ -1030,7 +1131,13 @@ void simcom_cmd(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, c
 void simcom_status(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
   {
   bool debug = (strcmp(cmd->GetName(), "debug") == 0);
-  
+
+  if (MyPeripherals->m_simcom->m_pincode_required)
+    {
+    writer->printf("SIM card PIN code required.\n");
+    if (MyConfig.GetParamValueBool("modem","wrongpincode"))
+      writer->printf("Wrong PIN (%s) entered!\n", MyConfig.GetParamValue("modem","pincode").c_str());
+    }
   writer->printf("Network Registration: %s\nProvider: %s\nSignal: %d dBm\n\nState: %s\n",
     SimcomNetRegName(MyPeripherals->m_simcom->m_netreg),
     MyPeripherals->m_simcom->m_provider.c_str(),
@@ -1042,6 +1149,11 @@ void simcom_status(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc
     writer->printf("  Ticker: %d\n  User Data: %d\n",
       MyPeripherals->m_simcom->m_state1_ticker,
       MyPeripherals->m_simcom->m_state1_userdata);
+    writer->printf(
+      "  HW FIFO overflows: %d\n"
+      "  Buffer overflows: %d\n"
+      , MyPeripherals->m_simcom->m_err_fifo_ovf
+      , MyPeripherals->m_simcom->m_err_buffer_full);
 
     if (MyPeripherals->m_simcom->m_state1_timeout_goto != simcom::None)
       {
@@ -1095,12 +1207,10 @@ void simcom_status(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc
     }
   if (debug)
     {
-    writer->printf("     Status: %s%s\n",
-      MyConfig.GetParamValueBool("modem", "enable.gps", false) ? "enabled" : "disabled",
-      MyPeripherals->m_simcom->m_gps_required ? ", required" : "");
-    writer->printf("     Time: %s%s\n",
-      MyConfig.GetParamValueBool("modem", "enable.gpstime", false) ? "enabled" : "disabled",
-      MyPeripherals->m_simcom->m_nmea.m_gpstime_required ? ", required" : "");
+    writer->printf("     Status: %s\n",
+      MyConfig.GetParamValueBool("modem", "enable.gps", false) ? "enabled" : "disabled");
+    writer->printf("     Time: %s\n",
+      MyConfig.GetParamValueBool("modem", "enable.gpstime", false) ? "enabled" : "disabled");
     }
 
   }
@@ -1120,8 +1230,8 @@ void simcom_setstate(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int ar
     newstate = simcom::CheckPowerOff;
   else if (strcmp(statename,"PoweringOn")==0)
     newstate = simcom::PoweringOn;
-  else if (strcmp(statename,"PoweredOff")==0)
-    newstate = simcom::PoweredOff;
+  else if (strcmp(statename,"PoweredOn")==0)
+    newstate = simcom::PoweredOn;
   else if (strcmp(statename,"MuxStart")==0)
     newstate = simcom::MuxStart;
   else if (strcmp(statename,"NetWait")==0)
@@ -1163,17 +1273,17 @@ SimcomInit::SimcomInit()
   {
   ESP_LOGI(TAG, "Initialising SIMCOM (4600)");
 
-  OvmsCommand* cmd_simcom = MyCommandApp.RegisterCommand("simcom","SIMCOM framework",simcom_status, "", 0, 1);
-  cmd_simcom->RegisterCommand("tx","Transmit data on SIMCOM",simcom_tx, "", 1, INT_MAX, true);
-  cmd_simcom->RegisterCommand("muxtx","Transmit data on SIMCOM MUX",simcom_muxtx, "<chan> <data>", 2, INT_MAX, true);
-  OvmsCommand* cmd_status = cmd_simcom->RegisterCommand("status","Show SIMCOM status",simcom_status, "", 0);
-  cmd_status->RegisterCommand("debug","Show extended SIMCOM status",simcom_status, "", 0);
-  cmd_simcom->RegisterCommand("cmd","Send SIMCOM AT command",simcom_cmd, "<command>", 1, INT_MAX, true);
+  OvmsCommand* cmd_simcom = MyCommandApp.RegisterCommand("simcom","SIMCOM framework",simcom_status, "", 0, 0, false);
+  cmd_simcom->RegisterCommand("tx","Transmit data on SIMCOM",simcom_tx, "", 1, INT_MAX);
+  cmd_simcom->RegisterCommand("muxtx","Transmit data on SIMCOM MUX",simcom_muxtx, "<chan> <data>", 2, INT_MAX);
+  OvmsCommand* cmd_status = cmd_simcom->RegisterCommand("status","Show SIMCOM status",simcom_status, "[debug]", 0, 0, false);
+  cmd_status->RegisterCommand("debug","Show extended SIMCOM status",simcom_status, "", 0, 0, false);
+  cmd_simcom->RegisterCommand("cmd","Send SIMCOM AT command",simcom_cmd, "<command>", 1, INT_MAX);
 
-  OvmsCommand* cmd_setstate = cmd_simcom->RegisterCommand("setstate","SIMCOM state change framework",NULL, "", 0, 0, true);
+  OvmsCommand* cmd_setstate = cmd_simcom->RegisterCommand("setstate","SIMCOM state change framework");
   for (int x = simcom::CheckPowerOff; x<=simcom::PowerOffOn; x++)
     {
-    cmd_setstate->RegisterCommand(SimcomState1Name((simcom::SimcomState1)x),"Force SIMCOM state change",simcom_setstate, "", 0, 0, true);
+    cmd_setstate->RegisterCommand(SimcomState1Name((simcom::SimcomState1)x),"Force SIMCOM state change",simcom_setstate);
     }
 
   MyConfig.RegisterParam("modem", "Modem Configuration", true, true);

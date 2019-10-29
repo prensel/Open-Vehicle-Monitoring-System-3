@@ -31,9 +31,19 @@
 #ifndef __UTILS_H__
 #define __UTILS_H__
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <cstring>
 #include <string>
 #include "ovms.h"
+
+// Macro utils:
+// see https://gcc.gnu.org/onlinedocs/cpp/Stringizing.html#Stringizing
+// STR(x) = string of x, x expanded if preprocessor macro
+#ifndef STR
+#define STRX(x)   #x
+#define STR(x)    STRX(x)
+#endif
 
 struct CmpStrOp
   {
@@ -42,6 +52,11 @@ struct CmpStrOp
     return std::strcmp(a, b) < 0;
     }
   };
+
+inline bool strtobool(const std::string& str)
+  {
+  return (str == "yes" || str == "1" || str == "true");
+  }
 
 /**
  * chargestate_code: convert legacy chargestate key to code
@@ -75,21 +90,85 @@ std::string mp_encode(const std::string text);
 extram::string mp_encode(const extram::string text);
 
 /**
+ * stripcr:
+ *  - replace '\r\n' by '\n'
+ */
+extram::string stripcr(const extram::string& text);
+
+/**
+ * stripesc: remove terminal escape sequences from (log) string
+ */
+std::string stripesc(const char* s);
+
+/**
  * startsWith: std::string prefix check
  */
 bool startsWith(const std::string& haystack, const std::string& needle);
+bool startsWith(const std::string& haystack, const char needle);
+
+/**
+ * endsWith: std::string suffix check
+ */
+bool endsWith(const std::string& haystack, const std::string& needle);
+bool endsWith(const std::string& haystack, const char needle);
+
+/**
+ * HexByte: Write a single byte as two hexadecimal characters
+ * Returns new pointer to end of string (p + 2)
+ */
+char* HexByte(char* p, uint8_t byte);
 
 /**
  * FormatHexDump: create/fill hexdump buffer including printable representation
  * Note: allocates buffer as necessary in *bufferp, caller must free.
+ * Returns new remaining length
  */
-int FormatHexDump(char** bufferp, const char* data, size_t rlength, size_t colsize=16);
+size_t FormatHexDump(char** bufferp, const char* data, size_t rlength, size_t colsize=16);
 
 
 /**
  * json_encode: encode string for JSON transport (see http://www.json.org/)
  */
-std::string json_encode(const std::string text);
+template <class src_string>
+std::string json_encode(const src_string text)
+  {
+  std::string buf;
+  char hex[10];
+  buf.reserve(text.size() + (text.size() >> 3));
+  for (int i=0; i<text.size(); i++)
+    {
+    switch(text[i])
+      {
+      case '\n':        buf += "\\n"; break;
+      case '\r':        buf += "\\r"; break;
+      case '\t':        buf += "\\t"; break;
+      case '\b':        buf += "\\b"; break;
+      case '\f':        buf += "\\f"; break;
+      case '\"':        buf += "\\\""; break;
+      case '\\':        buf += "\\\\"; break;
+      default:
+        if (iscntrl(text[i]))
+          {
+          sprintf(hex, "\\u%04x", (unsigned int)text[i]);
+          buf += hex;
+          }
+        else
+          {
+          buf += text[i];
+          }
+        break;
+      }
+    }
+	return buf;
+  }
+
+
+/**
+ * mqtt_topic: convert dotted string (e.g. notification subtype) to MQTT topic
+ *  - replace '.' by '/'
+ */
+std::string mqtt_topic(const std::string text);
+
 
 /**
  * pwgen: simple password generator
@@ -97,5 +176,30 @@ std::string json_encode(const std::string text);
  *  srand48(StdMetrics.ms_m_monotonic->AsInt() * StdMetrics.ms_m_freeram->AsInt());
  */
 std::string pwgen(int length);
+
+#ifdef CONFIG_FREERTOS_USE_TRACE_FACILITY
+#define HAVE_TaskGetHandle
+/**
+ * TaskGetHandle: get task handle by name
+ * (FreeRTOS xTaskGetHandle() is not available)
+ */
+TaskHandle_t TaskGetHandle(const char *name);
+#endif // CONFIG_FREERTOS_USE_TRACE_FACILITY
+
+
+/**
+ * mkpath: mkdir -p
+ */
+int mkpath(std::string path, mode_t mode = 0);
+
+/**
+ * rmtree: rmdir -r
+ */
+int rmtree(const std::string path);
+
+/**
+ * path_exists: check if filesystem path exists
+ */
+bool path_exists(const std::string path);
 
 #endif //#ifndef __UTILS_H__

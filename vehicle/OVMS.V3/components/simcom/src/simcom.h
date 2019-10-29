@@ -33,14 +33,16 @@
 
 #include "gsmpppos.h"
 #include "gsmnmea.h"
+#include "ovms.h"
 #include "pcp.h"
 #include "ovms_events.h"
 #include "gsmmux.h"
 #include "ovms_buffer.h"
+#include "ovms_command.h"
 
 #define SIMCOM_BUF_SIZE 1024
 
-class simcom : public pcp
+class simcom : public pcp, public InternalRamAllocated
   {
   public:
     simcom(const char* name, uart_port_t uartnum, int baud, int rxpin, int txpin, int pwregpio, int dtregpio);
@@ -49,6 +51,8 @@ class simcom : public pcp
   public:
     virtual void SetPowerMode(PowerMode powermode);
     void AutoInit();
+    void Restart();
+    void SupportSummary(OvmsWriter* writer);
 
   public:
     void tx(uint8_t* data, size_t size);
@@ -126,9 +130,11 @@ class simcom : public pcp
     GsmMux       m_mux;
     GsmPPPOS     m_ppp;
     GsmNMEA      m_nmea;
-    bool         m_gps_required;
     int          m_line_unfinished;
     std::string  m_line_buffer;
+    bool         m_pincode_required;
+    int          m_err_fifo_ovf;
+    int          m_err_buffer_full;
 
   protected:
     void SetState1(SimcomState1 newstate);
